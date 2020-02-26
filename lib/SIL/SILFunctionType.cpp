@@ -2636,6 +2636,12 @@ public:
       return ParameterConvention::Indirect_In_Guaranteed;
     return ParameterConvention::Indirect_Inout;
   }
+  ResultConvention getResult(const TypeLowering &resultTL) const override {
+    if (dyn_cast<clang::CXXConstructorDecl>(TheDecl)) {
+      return ResultConvention::Indirect;
+    }
+    return CFunctionTypeConventions::getResult(resultTL);
+  }
   static bool classof(const Conventions *C) {
     return C->getKind() == ConventionsKind::CXXMethod;
   }
