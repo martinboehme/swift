@@ -3404,9 +3404,27 @@ const clang::Type *AnyFunctionType::getCanonicalClangFunctionType() const {
   return ty ? ty->getCanonicalTypeInternal().getTypePtr() : nullptr;
 }
 
+const clang::CXXConstructorDecl *AnyFunctionType::getClangConstructorDecl() const {
+  switch (getKind()) {
+  case TypeKind::Function:
+    return cast<FunctionType>(this)->getClangConstructorDecl();
+  case TypeKind::GenericFunction:
+    // Generic functions do not have constructor decls.
+    return nullptr;
+  default:
+    llvm_unreachable("Illegal type kind for AnyFunctionType.");
+  }
+}
+
 // TODO: [store-sil-clang-function-type]
 const clang::FunctionType *SILFunctionType::getClangFunctionType() const {
   return nullptr;
+}
+
+const clang::CXXConstructorDecl *SILFunctionType::getClangConstructorDecl() const {
+  if (!hasUncommonInfo())
+    return nullptr;
+  return getTrailingObjects<ExtInfo::Uncommon>()->ClangConstructorDecl;
 }
 
 FunctionType *

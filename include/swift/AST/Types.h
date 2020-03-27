@@ -45,6 +45,7 @@
 namespace clang {
 class Type;
 class FunctionType;
+class CXXConstructorDecl;
 } // namespace clang
 
 namespace llvm {
@@ -2983,8 +2984,13 @@ public:
       //    clang::FunctionType.
       const clang::Type *ClangFunctionType;
 
-      bool empty() const { return !ClangFunctionType; }
-      Uncommon(const clang::Type *type) : ClangFunctionType(type) {}
+      // TODO: This doesn't really work though -- as we'll never be able to
+      // serialize it?
+      const clang::CXXConstructorDecl *ClangConstructorDecl;
+
+      bool empty() const { return !ClangFunctionType && !ClangConstructorDecl; }
+      Uncommon(const clang::Type *type, const clang::CXXConstructorDecl *ctor)
+          : ClangFunctionType(type), ClangConstructorDecl(ctor) {}
 
     public:
       /// Use the ClangModuleLoader to print the Clang type as a string.
@@ -3031,7 +3037,7 @@ public:
                   | (Throws ? ThrowsMask : 0)
                   | (((unsigned)DiffKind << DifferentiabilityMaskOffset)
                      & DifferentiabilityMask),
-                Uncommon(type)) {
+                Uncommon(type, nullptr)) {
     }
 
     bool isNoEscape() const { return Bits & NoEscapeMask; }
@@ -3049,6 +3055,9 @@ public:
       assert(rawRep <= unsigned(Representation::Last)
              && "unexpected SIL representation");
       return Representation(rawRep);
+    }
+    const clang::CXXConstructorDecl *getClangCtorDecl() const {
+      return Other.ClangConstructorDecl;
     }
 
     /// Return the underlying Uncommon value if it is not the default value.
@@ -3110,7 +3119,11 @@ public:
     }
     LLVM_NODISCARD
     ExtInfo withClangFunctionType(const clang::Type *type) const {
-      return ExtInfo(Bits, Uncommon(type));
+      return ExtInfo(Bits, Uncommon(type, Other.ClangConstructorDecl));
+    }
+    LLVM_NODISCARD
+    ExtInfo withClangCtorDecl(const clang::CXXConstructorDecl *ctorDecl) const {
+      return ExtInfo(Bits, Uncommon(Other.ClangFunctionType, ctorDecl));
     }
     LLVM_NODISCARD
     ExtInfo
@@ -3201,15 +3214,17 @@ public:
 
   GenericSignature getOptGenericSignature() const;
   
-  bool hasClangFunctionType() const {
+  bool hasUncommonInfo() const {
     return Bits.AnyFunctionType.HasUncommonInfo;
   }
 
   const clang::Type *getClangFunctionType() const;
   const clang::Type *getCanonicalClangFunctionType() const;
 
+  const clang::CXXConstructorDecl *getClangConstructorDecl() const;
+
   ExtInfo getExtInfo() const {
-    return ExtInfo(Bits.AnyFunctionType.ExtInfoBits, getClangFunctionType());
+    return ExtInfo(Bits.AnyFunctionType.ExtInfoBits, ExtInfo::Uncommon(getClangFunctionType(), getClangConstructorDecl()));
   }
 
   /// Get the canonical ExtInfo for the function type.
@@ -3218,8 +3233,10 @@ public:
   /// In the future, we will always use the canonical clang function type.
   ExtInfo getCanonicalExtInfo(bool useClangFunctionType) const {
     return ExtInfo(Bits.AnyFunctionType.ExtInfoBits,
-                   useClangFunctionType ? getCanonicalClangFunctionType()
-                                        : nullptr);
+                   ExtInfo::Uncommon(useClangFunctionType
+                                         ? getCanonicalClangFunctionType()
+                                         : nullptr,
+                   getClangConstructorDecl()));
   }
 
   /// Get the representation of the function type.
@@ -3430,7 +3447,7 @@ class FunctionType final : public AnyFunctionType,
   }
 
   size_t numTrailingObjects(OverloadToken<ExtInfo::Uncommon>) const {
-    return hasClangFunctionType() ? 1 : 0;
+    return hasUncommonInfo() ? 1 : 0;
   }
 
 public:
@@ -3443,8 +3460,14 @@ public:
     return {getTrailingObjects<Param>(), getNumParams()};
   }
 
+  const clang::CXXConstructorDecl *getClangConstructorDecl() const {
+    if (!hasUncommonInfo())
+      return nullptr;
+    return getTrailingObjects<ExtInfo::Uncommon>()->ClangConstructorDecl;
+  }
+
   const clang::Type *getClangFunctionType() const {
-    if (!hasClangFunctionType())
+    if (!hasUncommonInfo())
       return nullptr;
     auto *type = getTrailingObjects<ExtInfo::Uncommon>()->ClangFunctionType;
     assert(type && "If the pointer was null, we shouldn't have stored it.");
@@ -4109,40 +4132,14 @@ namespace Lowering {
   class TypeConverter;
 };
 
-/// SILFunctionType - The lowered type of a function value, suitable
-/// for use by SIL.
-///
-/// This type is defined by the AST library because it must be capable
-/// of appearing in secondary positions, e.g. within tuple and
-/// function parameter and result types.
-class SILFunctionType final : public TypeBase, public llvm::FoldingSetNode,
-    private llvm::TrailingObjects<SILFunctionType, SILParameterInfo,
-                                  SILResultInfo, SILYieldInfo,
-                                  SubstitutionMap, CanType> {
-  friend TrailingObjects;
-
-  size_t numTrailingObjects(OverloadToken<SILParameterInfo>) const {
-    return NumParameters;
-  }
-
-  size_t numTrailingObjects(OverloadToken<SILResultInfo>) const {
-    return getNumResults() + (hasErrorResult() ? 1 : 0);
-  }
-
-  size_t numTrailingObjects(OverloadToken<SILYieldInfo>) const {
-    return getNumYields();
-  }
-
-  size_t numTrailingObjects(OverloadToken<CanType>) const {
-    return hasResultCache() ? 2 : 0;
-  }
-
-  size_t numTrailingObjects(OverloadToken<SubstitutionMap>) const {
-    return size_t(hasPatternSubstitutions())
-         + size_t(hasInvocationSubstitutions());
-  }
-
+/// Base type that's needed so SILFunctionType's TrailingObjects can see the
+/// ExtInfo.
+class SILFunctionTypeBase : public TypeBase {
 public:
+  SILFunctionTypeBase(TypeKind kind, const ASTContext *CanTypeCtx,
+                      RecursiveTypeProperties properties)
+      : TypeBase(kind, CanTypeCtx, properties) {}
+
   using Language = SILFunctionLanguage;
   using Representation = SILFunctionTypeRepresentation;
 
@@ -4175,8 +4172,11 @@ public:
       // avoid depending on the Clang AST in this header.
       const clang::FunctionType *ClangFunctionType;
 
-      bool empty() const { return !ClangFunctionType; }
-      Uncommon(const clang::FunctionType *type) : ClangFunctionType(type) {}
+      const clang::CXXConstructorDecl *ClangConstructorDecl;
+
+      bool empty() const { return !ClangFunctionType && !ClangConstructorDecl; }
+      Uncommon(const clang::FunctionType *type, const clang::CXXConstructorDecl *ctor)
+          : ClangFunctionType(type), ClangConstructorDecl(ctor) {}
 
     public:
       /// Analog of AnyFunctionType::ExtInfo::Uncommon::printClangFunctionType.
@@ -4191,7 +4191,7 @@ public:
     friend class SILFunctionType;
   public:
     // Constructor with all defaults.
-    ExtInfo() : Bits(0), Other(Uncommon(nullptr)) { }
+    ExtInfo() : Bits(0), Other(Uncommon(nullptr, nullptr)) { }
 
     // Constructor for polymorphic type.
     ExtInfo(Representation rep, bool isPseudogeneric, bool isNoEscape,
@@ -4202,7 +4202,7 @@ public:
                   | (isNoEscape ? NoEscapeMask : 0)
                   | (((unsigned)diffKind << DifferentiabilityMaskOffset)
                      & DifferentiabilityMask),
-                Uncommon(type)) {
+                Uncommon(type, nullptr)) {
     }
 
     static ExtInfo getThin() {
@@ -4298,6 +4298,9 @@ public:
               ((unsigned)differentiability << DifferentiabilityMaskOffset),
           Other);
     }
+    ExtInfo withClangCtorDecl(const clang::CXXConstructorDecl *ctorDecl) const {
+      return ExtInfo(Bits, Uncommon(Other.ClangFunctionType, ctorDecl));
+    }
 
     std::pair<unsigned, const void *> getFuncAttrKey() const {
       return std::make_pair(Bits, Other.ClangFunctionType);
@@ -4310,6 +4313,41 @@ public:
       return Bits != Other.Bits;
     }
   };
+};
+
+/// SILFunctionType - The lowered type of a function value, suitable
+/// for use by SIL.
+///
+/// This type is defined by the AST library because it must be capable
+/// of appearing in secondary positions, e.g. within tuple and
+/// function parameter and result types.
+class SILFunctionType final : public SILFunctionTypeBase, public llvm::FoldingSetNode,
+    private llvm::TrailingObjects<SILFunctionType, SILParameterInfo,
+                                  SILResultInfo, SILYieldInfo,
+                                  SubstitutionMap, CanType,
+                                  SILFunctionTypeBase::ExtInfo::Uncommon> {
+  friend TrailingObjects;
+
+  size_t numTrailingObjects(OverloadToken<SILParameterInfo>) const {
+    return NumParameters;
+  }
+
+  size_t numTrailingObjects(OverloadToken<SILResultInfo>) const {
+    return getNumResults() + (hasErrorResult() ? 1 : 0);
+  }
+
+  size_t numTrailingObjects(OverloadToken<SILYieldInfo>) const {
+    return getNumYields();
+  }
+
+  size_t numTrailingObjects(OverloadToken<CanType>) const {
+    return hasResultCache() ? 2 : 0;
+  }
+
+  size_t numTrailingObjects(OverloadToken<SubstitutionMap>) const {
+    return size_t(hasPatternSubstitutions())
+         + size_t(hasInvocationSubstitutions());
+  }
 
 private:
   unsigned NumParameters;
@@ -4375,6 +4413,11 @@ private:
     assert(hasResultCache());
     return *(const_cast<SILFunctionType *>(this)->getTrailingObjects<CanType>()
              + 1);
+  }
+
+  ExtInfo::Uncommon &getMutableUncommonInfo() {
+    assert(hasUncommonInfo());
+    return *getTrailingObjects<ExtInfo::Uncommon>();
   }
 
   SILFunctionType(GenericSignature genericSig, ExtInfo ext,
@@ -4692,7 +4735,13 @@ public:
     return WitnessMethodConformance;
   }
 
+  bool hasUncommonInfo() const {
+    return Bits.SILFunctionType.HasUncommonInfo;
+  }
+
   const clang::FunctionType *getClangFunctionType() const;
+
+  const clang::CXXConstructorDecl *getClangConstructorDecl() const;
 
   /// Given that `this` is a `@differentiable` or `@differentiable(linear)`
   /// function type, returns an `IndexSubset` corresponding to the
@@ -4839,7 +4888,9 @@ public:
       CanGenericSignature transposeFunctionGenericSignature = nullptr);
 
   ExtInfo getExtInfo() const {
-    return ExtInfo(Bits.SILFunctionType.ExtInfoBits, getClangFunctionType());
+    return ExtInfo(
+        Bits.SILFunctionType.ExtInfoBits,
+        ExtInfo::Uncommon(getClangFunctionType(), getClangConstructorDecl()));
   }
 
   /// Returns the language-level calling convention of the function.

@@ -1994,7 +1994,8 @@ static CanSILFunctionType getSILFunctionType(
     .withRepresentation(extInfo.getSILRepresentation())
     .withIsPseudogeneric(pseudogeneric)
     .withNoEscape(extInfo.isNoEscape())
-    .withDifferentiabilityKind(extInfo.getDifferentiabilityKind());
+    .withDifferentiabilityKind(extInfo.getDifferentiabilityKind())
+    .withClangCtorDecl(extInfo.getClangCtorDecl());
   
   // Build the substituted generic signature we extracted.
   SubstitutionMap substitutions;
@@ -2677,6 +2678,9 @@ getSILFunctionTypeForClangDecl(TypeConverter &TC, const clang::Decl *clangDecl,
     AbstractionPattern origPattern =
         AbstractionPattern::getCXXMethod(origType, method);
     auto conventions = CXXMethodConventions(method);
+    if (auto ctor = dyn_cast<clang::CXXConstructorDecl>(method)) {
+      extInfo = extInfo.withClangCtorDecl(ctor);
+    }
     return getSILFunctionType(TC, TypeExpansionContext::minimal(), origPattern,
                               substInterfaceType, extInfo, conventions,
                               foreignInfo, constant, constant, None,

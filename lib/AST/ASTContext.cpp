@@ -3228,13 +3228,13 @@ SILFunctionType::SILFunctionType(
     const ASTContext &ctx,
     RecursiveTypeProperties properties,
     ProtocolConformanceRef witnessMethodConformance)
-    : TypeBase(TypeKind::SILFunction, &ctx, properties),
+    : SILFunctionTypeBase(TypeKind::SILFunction, &ctx, properties),
       InvocationGenericSig(CanGenericSignature(genericSig)),
       WitnessMethodConformance(witnessMethodConformance) {
 
   Bits.SILFunctionType.HasErrorResult = errorResult.hasValue();
   Bits.SILFunctionType.ExtInfoBits = ext.Bits;
-  Bits.SILFunctionType.HasUncommonInfo = false;
+  Bits.SILFunctionType.HasUncommonInfo = ext.getUncommonInfo().hasValue();
   Bits.SILFunctionType.HasPatternSubs = (bool) patternSubs;
   Bits.SILFunctionType.HasInvocationSubs = (bool) invocationSubs;
   // The use of both assert() and static_assert() below is intentional.
@@ -3277,6 +3277,10 @@ SILFunctionType::SILFunctionType(
   if (hasResultCache()) {
     getMutableFormalResultsCache() = CanType();
     getMutableAllResultsCache() = CanType();
+  }
+
+  if (hasUncommonInfo()) {
+    getMutableUncommonInfo() = *ext.getUncommonInfo();
   }
 #ifndef NDEBUG
   if (ext.getRepresentation() == Representation::WitnessMethod)
@@ -3411,10 +3415,10 @@ CanSILFunctionType SILFunctionType::get(
   bool hasResultCache = normalResults.size() > 1;
   size_t bytes =
     totalSizeToAlloc<SILParameterInfo, SILResultInfo, SILYieldInfo,
-                     SubstitutionMap, CanType>(
+                     SubstitutionMap, CanType, ExtInfo::Uncommon>(
       params.size(), normalResults.size() + (errorResult ? 1 : 0),
       yields.size(), (patternSubs ? 1 : 0) + (invocationSubs ? 1 : 0),
-      hasResultCache ? 2 : 0);
+      hasResultCache ? 2 : 0, !ext.Other.empty());
 
   void *mem = ctx.Allocate(bytes, alignof(SILFunctionType));
 

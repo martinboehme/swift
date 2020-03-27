@@ -1125,10 +1125,18 @@ void SignatureExpansion::expandExternalSignatureTypes() {
 
   // Generate function info for this signature.
   auto extInfo = clang::FunctionType::ExtInfo();
-  auto &FI = clang::CodeGen::arrangeFreeFunctionCall(IGM.ClangCodeGen->CGM(),
-                                             clangResultTy, paramTys, extInfo,
-                                             clang::CodeGen::RequiredArgs::All);
-  ForeignInfo.ClangInfo = &FI;
+  clang::CXXConstructorDecl *cxxConstructorDecl =
+      const_cast<clang::CXXConstructorDecl *>(
+          FnType->getClangConstructorDecl());
+  if (cxxConstructorDecl) {
+    ForeignInfo.ClangInfo = &clang::CodeGen::arrangeCXXConstructorCall(IGM.ClangCodeGen->CGM(),
+                                               cxxConstructorDecl, paramTys, extInfo);
+  } else {
+    ForeignInfo.ClangInfo = &clang::CodeGen::arrangeFreeFunctionCall(IGM.ClangCodeGen->CGM(),
+                                               clangResultTy, paramTys, extInfo,
+                                               clang::CodeGen::RequiredArgs::All);
+  }
+  auto &FI = *ForeignInfo.ClangInfo;
 
   assert(FI.arg_size() == paramTys.size() &&
          "Expected one ArgInfo for each parameter type!");
