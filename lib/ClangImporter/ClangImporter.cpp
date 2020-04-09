@@ -424,7 +424,7 @@ ClangImporter::~ClangImporter() {
 /// compiling for, and is not included in the resource directory with the other
 /// implicit module maps. It's at {freebsd|linux}/{arch}/glibc.modulemap.
 static Optional<StringRef>
-getGlibcModuleMapPath(SearchPathOptions& Opts, llvm::Triple triple,
+getGlibcModuleMapPath(SearchPathOptions& Opts, const LangOptions& LangOpts, llvm::Triple triple,
                       SmallVectorImpl<char> &buffer) {
   StringRef platform = swift::getPlatformNameForTriple(triple);
   StringRef arch = swift::getMajorArchitectureName(triple);
@@ -433,7 +433,13 @@ getGlibcModuleMapPath(SearchPathOptions& Opts, llvm::Triple triple,
     buffer.clear();
     buffer.append(Opts.SDKPath.begin(), Opts.SDKPath.end());
     llvm::sys::path::append(buffer, "usr", "lib", "swift");
-    llvm::sys::path::append(buffer, platform, arch, "glibc.modulemap");
+    // This is just an approximation for testing. We would need to switch
+    // between glibc.modulemap and libcxx.modulemap depending on what the
+    // -stdlib option is set to.
+    if (LangOpts.EnableCXXInterop)
+      llvm::sys::path::append(buffer, platform, arch, "libcxx.modulemap");
+    else
+      llvm::sys::path::append(buffer, platform, arch, "glibc.modulemap");
 
     // Only specify the module map if that file actually exists.  It may not;
     // for example in the case that `swiftc -target x86_64-unknown-linux-gnu
@@ -446,7 +452,10 @@ getGlibcModuleMapPath(SearchPathOptions& Opts, llvm::Triple triple,
     buffer.clear();
     buffer.append(Opts.RuntimeResourcePath.begin(),
                   Opts.RuntimeResourcePath.end());
-    llvm::sys::path::append(buffer, platform, arch, "glibc.modulemap");
+    if (LangOpts.EnableCXXInterop)
+      llvm::sys::path::append(buffer, platform, arch, "libcxx.modulemap");
+    else
+      llvm::sys::path::append(buffer, platform, arch, "glibc.modulemap");
 
     // Only specify the module map if that file actually exists.  It may not;
     // for example in the case that `swiftc -target x86_64-unknown-linux-gnu
@@ -619,7 +628,7 @@ getNormalInvocationArguments(std::vector<std::string> &invocationArgStrs,
     }
 
     SmallString<128> buffer;
-    if (auto path = getGlibcModuleMapPath(searchPathOpts, triple, buffer)) {
+    if (auto path = getGlibcModuleMapPath(searchPathOpts, LangOpts, triple, buffer)) {
       invocationArgStrs.push_back((Twine("-fmodule-map-file=") + *path).str());
     } else {
       // FIXME: Emit a warning of some kind.

@@ -1,0 +1,3 @@
+module IncludeString {
+  header "IncludeString.h"
+}

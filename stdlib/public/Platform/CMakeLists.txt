@@ -138,3 +138,72 @@ endforeach()
 add_custom_target(glibc_modulemap DEPENDS ${glibc_modulemap_target_list})
 set_property(TARGET glibc_modulemap PROPERTY FOLDER "Miscellaneous")
 add_dependencies(sdk-overlay glibc_modulemap)
+
+set(libcxx_modulemap_target_list)
+foreach(sdk ${SWIFT_SDKS})
+  if(NOT "${sdk}" STREQUAL "LINUX" AND
+     NOT "${sdk}" STREQUAL "FREEBSD" AND
+     NOT "${sdk}" STREQUAL "ANDROID" AND
+     NOT "${sdk}" STREQUAL "CYGWIN" AND
+     NOT "${sdk}" STREQUAL "HAIKU")
+    continue()
+  endif()
+
+  foreach(arch ${SWIFT_SDK_${sdk}_ARCHITECTURES})
+    set(arch_subdir "${SWIFT_SDK_${sdk}_LIB_SUBDIR}/${arch}")
+    set(module_dir "${SWIFTLIB_DIR}/${arch_subdir}")
+
+    set(libcxx_modulemap_source "libcxx.modulemap.gyb")
+    set(libcxx_modulemap_out "${module_dir}/libcxx.modulemap")
+
+    # Configure the module map based on the target. Each platform needs to
+    # reference different headers, based on what's available in their glibc.
+    # This is the 'glibc.modulemap' in the 'resource-dir', so
+    # it's the one we'll look at during the build process.
+    handle_gyb_source_single(libcxx_modulemap_target
+        SOURCE "${libcxx_modulemap_source}"
+        OUTPUT "${libcxx_modulemap_out}"
+        FLAGS
+            "-DCMAKE_SDK=${sdk}"
+            "-DGLIBC_INCLUDE_PATH=${SWIFT_SDK_${sdk}_ARCH_${arch}_LIBC_INCLUDE_DIRECTORY}"
+            "-DGLIBC_ARCH_INCLUDE_PATH=${SWIFT_SDK_${sdk}_ARCH_${arch}_LIBC_ARCHITECTURE_INCLUDE_DIRECTORY}")
+
+    list(APPEND libcxx_modulemap_target_list ${libcxx_modulemap_target})
+
+    # If this SDK is a target for a non-native host, except if it's for Android
+    # with its own native sysroot, create a native modulemap without a sysroot
+    # prefix. This is the one we'll install instead.
+    if(NOT "${SWIFT_SDK_${SWIFT_HOST_VARIANT_SDK}_ARCH_${arch}_PATH}" STREQUAL "/" AND
+       NOT (${sdk} STREQUAL ANDROID AND NOT "${SWIFT_ANDROID_NATIVE_SYSROOT}" STREQUAL ""))
+      set(libcxx_sysroot_relative_modulemap_out "${module_dir}/sysroot-relative-modulemaps/libcxx.modulemap")
+
+      string(REPLACE "${SWIFT_SDK_${SWIFT_HOST_VARIANT_SDK}_ARCH_${arch}_PATH}"
+        "" absolute_libc_include_path "${SWIFT_SDK_${sdk}_ARCH_${arch}_LIBC_INCLUDE_DIRECTORY}")
+      string(REPLACE "${SWIFT_SDK_${SWIFT_HOST_VARIANT_SDK}_ARCH_${arch}_PATH}"
+        "" absolute_libc_arch_include_path ${SWIFT_SDK_${sdk}_ARCH_${arch}_LIBC_ARCHITECTURE_INCLUDE_DIRECTORY})
+
+      handle_gyb_source_single(libcxx_modulemap_native_target
+        SOURCE "${libcxx_modulemap_source}"
+        OUTPUT "${libcxx_sysroot_relative_modulemap_out}"
+        FLAGS "-DCMAKE_SDK=${sdk}"
+              "-DGLIBC_INCLUDE_PATH=${absolute_libc_include_path}"
+              "-DGLIBC_ARCH_INCLUDE_PATH=${absolute_libc_arch_include_path}")
+
+      list(APPEND libcxx_modulemap_target_list ${libcxx_modulemap_native_target})
+      set(libcxx_modulemap_out ${libcxx_sysroot_relative_modulemap_out})
+    endif()
+
+    # FIXME: When SDK is a cross-compile target (SDK != Host), the generated
+    #        modulemap will be relative to the Host, with hardcoded paths.
+    #        It is not relocatable to the target platform itself.
+    #        This affects any cross-comipled targets that use libcxx.modulemap.
+
+    swift_install_in_component(FILES "${libcxx_modulemap_out}"
+                               DESTINATION "lib/swift/${arch_subdir}"
+                               COMPONENT sdk-overlay)
+
+  endforeach()
+endforeach()
+add_custom_target(libcxx_modulemap DEPENDS ${libcxx_modulemap_target_list})
+set_property(TARGET libcxx_modulemap PROPERTY FOLDER "Miscellaneous")
+add_dependencies(sdk-overlay libcxx_modulemap)

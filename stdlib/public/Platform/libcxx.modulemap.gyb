@@ -1,0 +1,44 @@
+//===--- libcxx.modulemap.gyb ---------------------------------------------===//
+//
+// This source file is part of the Swift.org open source project
+//
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
+// Licensed under Apache License v2.0 with Runtime Library Exception
+//
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+//
+//===----------------------------------------------------------------------===//
+
+/// TODO: Comment
+module SwiftGlibc [system] {
+% if CMAKE_SDK in ["LINUX", "FREEBSD", "CYGWIN"]:
+  link "pthread"
+  // FIXME: util contains rarely used functions and not usually needed. Unfortunately
+  // link directive doesn't work in the submodule yet.
+  link "util"
+% end
+
+% if CMAKE_SDK != "FREEBSD" and CMAKE_SDK != "HAIKU":
+  link "dl"
+% end
+
+% if CMAKE_SDK == "HAIKU":
+  link "network"
+  link "bsd"
+  link "execinfo"
+% end
+
+  // C standard library
+  module C {
+    // TODO: Do we need to do anything to re-export things from libc++ here?
+  }
+}
+
+% if CMAKE_SDK != "WASI":
+module CUUID [system] {
+  header "${GLIBC_INCLUDE_PATH}/uuid/uuid.h"
+  link "uuid"
+  export *
+}
+% end
