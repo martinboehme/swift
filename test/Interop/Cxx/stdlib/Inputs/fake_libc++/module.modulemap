@@ -1,0 +1,8 @@
+module fake_std {
+  module depr [extern_c] {
+    module math_h {
+      header "fake_math.h"
+      export *
+    }
+ }
+}

@@ -102,6 +102,19 @@ foreach(sdk ${SWIFT_SDKS})
 
     list(APPEND glibc_modulemap_target_list ${glibc_modulemap_target})
 
+    set(glibc_wrapper_source "glibc_wrapper.h.gyb")
+    set(glibc_wrapper_out "${module_dir}/glibc_wrapper.h")
+
+    handle_gyb_source_single(glibc_wrapper_target
+        SOURCE "${glibc_wrapper_source}"
+        OUTPUT "${glibc_wrapper_out}"
+        FLAGS
+            "-DCMAKE_SDK=${sdk}"
+            "-DGLIBC_INCLUDE_PATH=${SWIFT_SDK_${sdk}_ARCH_${arch}_LIBC_INCLUDE_DIRECTORY}"
+            "-DGLIBC_ARCH_INCLUDE_PATH=${SWIFT_SDK_${sdk}_ARCH_${arch}_LIBC_ARCHITECTURE_INCLUDE_DIRECTORY}")
+
+    list(APPEND glibc_modulemap_target_list ${glibc_wrapper_target})
+
     # If this SDK is a target for a non-native host, except if it's for Android
     # with its own native sysroot, create a native modulemap without a sysroot
     # prefix. This is the one we'll install instead.
@@ -131,6 +144,12 @@ foreach(sdk ${SWIFT_SDKS})
     #        This affects any cross-comipled targets that use glibc.modulemap.
 
     swift_install_in_component(FILES "${glibc_modulemap_out}"
+                               DESTINATION "lib/swift/${arch_subdir}"
+                               COMPONENT sdk-overlay)
+
+    # TODO: This should really go in the "include" tree, not the "lib" tree, but
+    # for experimentation, this is fine.
+    swift_install_in_component(FILES "${glibc_wrapper_out}"
                                DESTINATION "lib/swift/${arch_subdir}"
                                COMPONENT sdk-overlay)
 

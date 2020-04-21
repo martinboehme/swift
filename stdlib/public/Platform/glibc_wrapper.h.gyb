@@ -1,0 +1,102 @@
+// This doesn't contain any gyb commands yet. A real implementation would need
+// to add gyb commands that conditionally include certain headers based on the
+// platform.
+
+%{
+# C standard library
+c_headers = [
+  'complex.h',
+  'ctype.h',
+  'errno.h',
+  'fenv.h',
+  'inttypes.h',
+  'locale.h',
+  'math.h',
+  'setjmp.h',
+  'signal.h',
+  'stdio.h',
+  'stdlib.h',
+  'string.h',
+  'time.h',
+]
+
+posix_headers = [
+  'aio.h',
+  'arpa/inet.h',
+  'bsd/pty.h',
+  'cpio.h',
+  'dirent.h',
+  'dlfcn.h',
+  'fcntl.h',
+  'fmtmsg.h',
+  'fnmatch.h',
+  'ftw.h',
+  'glob.h',
+  'grp.h',
+  # Haiku includes this as "../iconv.h" -- why?
+  'iconv.h',
+  # Haiku includes this as "../bsd/ifaddrs.h" -- why?
+  'ifaddrs.h',
+  'langinfo.h',
+  'libgen.h',
+  'libutil.h',
+  'link.h',
+  'monetary.h',
+  'net/if.h',
+  'netdb.h',
+  'netinet/in.h',
+  'netinet/tcp.h',
+  'nl_types.h',
+  'poll.h',
+  'pthread.h',
+  'pty.h',
+  'pwd.h',
+  'regex.h',
+  'sched.h',
+  'search.h',
+  'semaphore.h',
+  'spawn.h',
+  'strings.h',
+  'sys/cdefs.h',
+  'sys/event.h',
+  'sys/file.h',
+  'sys/inotify.h',
+  'sys/ioctl.h',
+  'sys/ipc.h',
+  'sys/mman.h',
+  'sys/msg.h',
+  'sys/resource.h',
+  'sys/select.h',
+  'sys/sem.h',
+  'sys/sendfile.h',
+  'sys/shm.h',
+  'sys/socket.h',
+  'sys/stat.h',
+  'sys/statvfs.h',
+  'sys/time.h',
+  'sys/times.h',
+  'sys/types.h',
+  'sys/uio.h',
+  'sys/un.h',
+  'sys/user.h',
+  'sys/utsname.h',
+  'sys/wait.h',
+  'sysexits.h',
+  'syslog.h',
+  'tar.h',
+  'termios.h',
+  'ulimit.h',
+  'unistd.h',
+  'utime.h',
+  'utmp.h',
+  'utmpx.h',
+  'wait.h',
+  'wordexp.h',
+]
+}%
+
+% for header in c_headers + posix_headers:
+#if __has_include(<${header}>)
+#  include<${header}>
+#endif
+% end

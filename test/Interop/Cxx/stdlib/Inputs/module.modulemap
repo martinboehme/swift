@@ -1,0 +1,14 @@
+module IncludeString {
+  header "include_string.h"
+  export *
+}
+
+module FakeSwiftGlibc {
+  header "FakeSwiftGlibc.h"
+  export *
+}
+
+module UseFakeGlibcFromCxx {
+  header "use_fake_glibc_from_cxx.h"
+  export *
+}

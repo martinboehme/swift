@@ -1,0 +1,4 @@
+module GlibcModuleImport {
+  header "glibc_module_import.h"
+  export *
+}
