@@ -641,11 +641,13 @@ static bool passCursorInfoForModule(ModuleEntity Mod,
 
 static void
 collectAvailableRenameInfo(const ValueDecl *VD,
+                           Optional<RenameRefInfo> RefInfo,
                            std::vector<UIdent> &RefactoringIds,
                            DelayedStringRetriever &RefactroingNameOS,
                            DelayedStringRetriever &RefactoringReasonOS) {
   std::vector<ide::RenameAvailabiliyInfo> Scratch;
-  for (auto Info : ide::collectRenameAvailabilityInfo(VD, Scratch)) {
+  for (auto Info : ide::collectRenameAvailabilityInfo(VD, RefInfo,
+                                                      Scratch)){
     RefactoringIds.push_back(SwiftLangSupport::
       getUIDForRefactoringKind(Info.Kind));
     RefactroingNameOS.startPiece();
@@ -837,8 +839,13 @@ static bool passCursorInfoForDecl(SourceFile* SF,
   std::vector<UIdent> RefactoringIds;
   DelayedStringRetriever RefactoringNameOS(SS);
   DelayedStringRetriever RefactoringReasonOS(SS);
+
   if (RetrieveRefactoring) {
-    collectAvailableRenameInfo(VD, RefactoringIds, RefactoringNameOS,
+    Optional<RenameRefInfo> RefInfo;
+    if (TheTok.IsRef)
+      RefInfo = {TheTok.SF, TheTok.Loc, TheTok.IsKeywordArgument};
+    collectAvailableRenameInfo(VD, RefInfo,
+                               RefactoringIds, RefactoringNameOS,
                                RefactoringReasonOS);
     collectAvailableRefactoringsOtherThanRename(SF, TheTok, RefactoringIds,
       RefactoringNameOS, RefactoringReasonOS);
@@ -908,24 +915,10 @@ static bool passCursorInfoForDecl(SourceFile* SF,
   } else if (VD->getModuleContext() != MainModule) {
     ModuleDecl *MD = VD->getModuleContext();
     // If the decl is from a cross-import overlay module, report the overlay's
-    // underlying module as the owning module.
-    if (SF) {
-      // In a source file we map the imported overlays to the underlying
-      // modules they shadow.
-      while (MD->getNameStr().startswith("_")) {
-        auto *Underlying = SF->getModuleShadowedBySeparatelyImportedOverlay(MD);
-        if (!Underlying)
-          break;
-        MD = Underlying;
-      }
-    } else if (MainModule) {
-      // In a module interface we need to map the declared overlays of the main
-      // module (which are included in its generated interface) back to the main
-      // module itself.
-      if (MainModule->isUnderlyingModuleOfCrossImportOverlay(MD))
-        MD = MainModule;
-    }
-    ModuleName = MD->getName().str().str();
+    // declaring module as the owning module.
+    if (ModuleDecl *Declaring = MD->getDeclaringModuleIfCrossImportOverlay())
+      MD = Declaring;
+    ModuleName = MD->getNameStr().str();
   }
   StringRef ModuleInterfaceName;
   if (auto IFaceGenRef = Lang.getIFaceGenContexts().find(ModuleName, Invok))
@@ -1169,7 +1162,7 @@ class CursorRangeInfoConsumer : public SwiftASTConsumer {
 protected:
   SwiftLangSupport &Lang;
   SwiftInvocationRef ASTInvok;
-  StringRef InputFile;
+  std::string InputFile;
   unsigned Offset;
   unsigned Length;
 
@@ -1188,7 +1181,7 @@ public:
   CursorRangeInfoConsumer(StringRef InputFile, unsigned Offset, unsigned Length,
                           SwiftLangSupport &Lang, SwiftInvocationRef ASTInvok,
                           bool TryExistingAST, bool CancelOnSubsequentRequest)
-    : Lang(Lang), ASTInvok(ASTInvok),InputFile(InputFile), Offset(Offset),
+    : Lang(Lang), ASTInvok(ASTInvok),InputFile(InputFile.str()), Offset(Offset),
       Length(Length), TryExistingAST(TryExistingAST),
       CancelOnSubsequentRequest(CancelOnSubsequentRequest) {}
 

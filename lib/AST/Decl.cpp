@@ -19,6 +19,7 @@
 #include "swift/AST/AccessScope.h"
 #include "swift/AST/ASTContext.h"
 #include "swift/AST/ASTWalker.h"
+#include "swift/AST/ASTMangler.h"
 #include "swift/AST/DiagnosticEngine.h"
 #include "swift/AST/DiagnosticsSema.h"
 #include "swift/AST/ExistentialLayout.h"
@@ -639,6 +640,7 @@ static_assert(sizeof(checkSourceLocType(&ID##Decl::getLoc)) == 2, \
     return getSerializedLocs()->Loc;
   }
   case FileUnitKind::Builtin:
+  case FileUnitKind::Synthesized:
   case FileUnitKind::ClangModule:
   case FileUnitKind::DWARFModule:
     return SourceLoc();
@@ -760,7 +762,7 @@ bool Decl::hasUnderscoredNaming() const {
   }
 
   if (!VD->getBaseName().isSpecial() &&
-      VD->getBaseName().getIdentifier().str().startswith("_")) {
+      VD->getBaseIdentifier().str().startswith("_")) {
     return true;
   }
 
@@ -1394,7 +1396,7 @@ createExtensionGenericParams(ASTContext &ctx,
   return toParams;
 }
 
-llvm::Expected<GenericParamList *>
+GenericParamList *
 GenericParamListRequest::evaluate(Evaluator &evaluator, GenericContext *value) const {
   if (auto *ext = dyn_cast<ExtensionDecl>(value)) {
     // Create the generic parameter list for the extension by cloning the
@@ -1855,6 +1857,17 @@ bool Pattern::isNeverDefaultInitializable() const {
   return result;
 }
 
+bool PatternBindingDecl::isDefaultInitializableViaPropertyWrapper(unsigned i) const {
+  if (auto singleVar = getSingleVar()) {
+    if (auto wrapperInfo = singleVar->getAttachedPropertyWrapperTypeInfo(0)) {
+      if (wrapperInfo.defaultInit)
+        return true;
+    }
+  }
+
+  return false;
+}
+
 bool PatternBindingDecl::isDefaultInitializable(unsigned i) const {
   const auto entry = getPatternList()[i];
 
@@ -1864,14 +1877,14 @@ bool PatternBindingDecl::isDefaultInitializable(unsigned i) const {
 
   // If the outermost attached property wrapper vends an `init()`, use that
   // for default initialization.
+  if (isDefaultInitializableViaPropertyWrapper(i))
+    return true;
+
+  // If one of the attached wrappers is missing a wrappedValue
+  // initializer, cannot default-initialize.
   if (auto singleVar = getSingleVar()) {
     if (auto wrapperInfo = singleVar->getAttachedPropertyWrapperTypeInfo(0)) {
-      if (wrapperInfo.defaultInit)
-        return true;
-
-      // If one of the attached wrappers is missing an initialValue
-      // initializer, cannot default-initialize.
-      if (!singleVar->allAttachedPropertyWrappersHaveInitialValueInit())
+      if (!singleVar->allAttachedPropertyWrappersHaveWrappedValueInit())
         return false;
     }
   }
@@ -2082,6 +2095,16 @@ getDirectReadWriteAccessStrategy(const AbstractStorageDecl *storage) {
   case ReadWriteImplKind::Modify:
     return AccessStrategy::getAccessor(AccessorKind::Modify,
                                        /*dispatch*/ false);
+  case ReadWriteImplKind::StoredWithSimpleDidSet:
+  case ReadWriteImplKind::InheritedWithSimpleDidSet:
+    if (storage->requiresOpaqueModifyCoroutine()) {
+      return AccessStrategy::getAccessor(AccessorKind::Modify,
+                                         /*dispatch*/ false);
+    } else {
+      return AccessStrategy::getMaterializeToTemporary(
+          getDirectReadAccessStrategy(storage),
+          getDirectWriteAccessStrategy(storage));
+    }
   case ReadWriteImplKind::MaterializeToTemporary:
     return AccessStrategy::getMaterializeToTemporary(
                                        getDirectReadAccessStrategy(storage),
@@ -2853,8 +2876,18 @@ OpaqueReturnTypeRepr *ValueDecl::getOpaqueResultTypeRepr() const {
 }
 
 OpaqueTypeDecl *ValueDecl::getOpaqueResultTypeDecl() const {
-  if (getOpaqueResultTypeRepr() == nullptr)
+  if (getOpaqueResultTypeRepr() == nullptr) {
+    if (isa<ModuleDecl>(this))
+      return nullptr;
+    auto file = cast<FileUnit>(getDeclContext()->getModuleScopeContext());
+    // Don't look up when the decl is from source, otherwise a cycle will happen.
+    if (file->getKind() == FileUnitKind::SerializedAST) {
+      Mangle::ASTMangler mangler;
+      auto name = mangler.mangleOpaqueTypeDecl(this);
+      return file->lookupOpaqueResultType(name);
+    }
     return nullptr;
+  }
 
   return evaluateOrDefault(getASTContext().evaluator,
     OpaqueResultTypeRequest{const_cast<ValueDecl *>(this)},
@@ -3156,7 +3189,7 @@ bool ValueDecl::shouldHideFromEditor() const {
 
   // '$__' names are reserved by compiler internal.
   if (!getBaseName().isSpecial() &&
-      getBaseName().getIdentifier().str().startswith("$__"))
+      getBaseIdentifier().str().startswith("$__"))
     return true;
 
   return false;
@@ -3575,8 +3608,8 @@ int TypeDecl::compare(const TypeDecl *type1, const TypeDecl *type2) {
       return result;
   }
 
-  if (int result = type1->getBaseName().getIdentifier().str().compare(
-                                  type2->getBaseName().getIdentifier().str()))
+  if (int result = type1->getBaseIdentifier().str().compare(
+                                  type2->getBaseIdentifier().str()))
     return result;
 
   // Error case: two type declarations that cannot be distinguished.
@@ -4059,6 +4092,14 @@ ConstructorDecl *NominalTypeDecl::getMemberwiseInitializer() const {
       ctx.evaluator, SynthesizeMemberwiseInitRequest{mutableThis}, nullptr);
 }
 
+ConstructorDecl *NominalTypeDecl::getEffectiveMemberwiseInitializer() {
+  auto &ctx = getASTContext();
+  auto *mutableThis = const_cast<NominalTypeDecl *>(this);
+  return evaluateOrDefault(ctx.evaluator,
+                           ResolveEffectiveMemberwiseInitRequest{mutableThis},
+                           nullptr);
+}
+
 bool NominalTypeDecl::hasDefaultInitializer() const {
   // Currently only structs and classes can have default initializers.
   if (!isa<StructDecl>(this) && !isa<ClassDecl>(this))
@@ -4117,7 +4158,7 @@ void NominalTypeDecl::synthesizeSemanticMembersIfNeeded(DeclName member) {
 
   if (auto actionToTake = action) {
     (void)evaluateOrDefault(Context.evaluator,
-        ResolveImplicitMemberRequest{this, actionToTake.getValue()}, false);
+        ResolveImplicitMemberRequest{this, actionToTake.getValue()}, {});
   }
 }
 
@@ -4195,7 +4236,7 @@ synthesizeEmptyFunctionBody(AbstractFunctionDecl *afd, void *context) {
            /*isTypeChecked=*/true };
 }
 
-llvm::Expected<DestructorDecl *>
+DestructorDecl *
 GetDestructorRequest::evaluate(Evaluator &evaluator, ClassDecl *CD) const {
   auto &ctx = CD->getASTContext();
   auto *DD = new (ctx) DestructorDecl(CD->getLoc(), CD);
@@ -4260,8 +4301,9 @@ AncestryOptions ClassDecl::checkAncestry() const {
                            AncestryFlags()));
 }
         
-llvm::Expected<AncestryFlags>
-ClassAncestryFlagsRequest::evaluate(Evaluator &evaluator, ClassDecl *value) const {
+AncestryFlags
+ClassAncestryFlagsRequest::evaluate(Evaluator &evaluator,
+                                    ClassDecl *value) const {
   llvm::SmallPtrSet<const ClassDecl *, 8> visited;
 
   AncestryOptions result;
@@ -5013,7 +5055,8 @@ ArrayRef<Requirement> ProtocolDecl::getCachedRequirementSignature() const {
 void ProtocolDecl::computeKnownProtocolKind() const {
   auto module = getModuleContext();
   if (module != module->getASTContext().getStdlibModule() &&
-      !module->getName().is("Foundation")) {
+      !module->getName().is("Foundation") &&
+      !module->getName().is("_Differentiation")) {
     const_cast<ProtocolDecl *>(this)->Bits.ProtocolDecl.KnownProtocol = 1;
     return;
   }
@@ -5026,6 +5069,41 @@ void ProtocolDecl::computeKnownProtocolKind() const {
       .Default(1);
 
   const_cast<ProtocolDecl *>(this)->Bits.ProtocolDecl.KnownProtocol = value;
+}
+
+Optional<KnownDerivableProtocolKind>
+    ProtocolDecl::getKnownDerivableProtocolKind() const {
+  const auto knownKind = getKnownProtocolKind();
+  if (!knownKind)
+      return None;
+
+  switch (*knownKind) {
+  case KnownProtocolKind::RawRepresentable:
+    return KnownDerivableProtocolKind::RawRepresentable;
+  case KnownProtocolKind::OptionSet:
+    return KnownDerivableProtocolKind::OptionSet;
+  case KnownProtocolKind::CaseIterable:
+    return KnownDerivableProtocolKind::CaseIterable;
+  case KnownProtocolKind::Comparable:
+    return KnownDerivableProtocolKind::Comparable;
+  case KnownProtocolKind::Equatable:
+    return KnownDerivableProtocolKind::Equatable;
+  case KnownProtocolKind::Hashable:
+    return KnownDerivableProtocolKind::Hashable;
+  case KnownProtocolKind::BridgedNSError:
+    return KnownDerivableProtocolKind::BridgedNSError;
+  case KnownProtocolKind::CodingKey:
+    return KnownDerivableProtocolKind::CodingKey;
+  case KnownProtocolKind::Encodable:
+    return KnownDerivableProtocolKind::Encodable;
+  case KnownProtocolKind::Decodable:
+    return KnownDerivableProtocolKind::Decodable;
+  case KnownProtocolKind::AdditiveArithmetic:
+    return KnownDerivableProtocolKind::AdditiveArithmetic;
+  case KnownProtocolKind::Differentiable:
+    return KnownDerivableProtocolKind::Differentiable;
+  default: return None;
+  }
 }
 
 bool ProtocolDecl::hasCircularInheritedProtocols() const {
@@ -5566,9 +5644,6 @@ Pattern *VarDecl::getParentPattern() const {
   if (auto *stmt = getParentPatternStmt()) {
     if (auto *FES = dyn_cast<ForEachStmt>(stmt))
       return FES->getPattern();
-    
-    if (auto *CS = dyn_cast<CatchStmt>(stmt))
-      return CS->getErrorPattern();
 
     if (auto *cs = dyn_cast<CaseStmt>(stmt)) {
       // In a case statement, search for the pattern that contains it.  This is
@@ -5807,7 +5882,7 @@ bool VarDecl::hasAttachedPropertyWrapper() const {
 
 /// Whether all of the attached property wrappers have an init(wrappedValue:)
 /// initializer.
-bool VarDecl::allAttachedPropertyWrappersHaveInitialValueInit() const {
+bool VarDecl::allAttachedPropertyWrappersHaveWrappedValueInit() const {
   for (unsigned i : indices(getAttachedPropertyWrappers())) {
     if (!getAttachedPropertyWrapperTypeInfo(i).wrappedValueInit)
       return false;
@@ -5912,7 +5987,7 @@ bool VarDecl::isPropertyMemberwiseInitializedWithWrappedType() const {
 
   // If all property wrappers have a wrappedValue initializer, the property
   // wrapper will be initialized that way.
-  return allAttachedPropertyWrappersHaveInitialValueInit();
+  return allAttachedPropertyWrappersHaveWrappedValueInit();
 }
 
 bool VarDecl::isInnermostPropertyWrapperInitUsesEscapingAutoClosure() const {
@@ -6292,105 +6367,27 @@ void ParamDecl::setDefaultArgumentCaptureInfo(CaptureInfo captures) {
   DefaultValueAndFlags.getPointer()->Captures = captures;
 }
 
-/// Return nullptr if there is no property wrapper
-Expr *swift::findOriginalPropertyWrapperInitialValue(VarDecl *var,
-                                                     Expr *init) {
-  auto *PBD = var->getParentPatternBinding();
-  if (!PBD)
-    return nullptr;
-
-  // If there is no '=' on the pattern, there was no initial value.
-  if (PBD->getEqualLoc(0).isInvalid() && !PBD->isDefaultInitializable())
-    return nullptr;
-
-  ASTContext &ctx = var->getASTContext();
-  auto dc = var->getInnermostDeclContext();
-  const auto wrapperAttrs = var->getAttachedPropertyWrappers();
-  if (wrapperAttrs.empty())
-    return nullptr;
-  auto innermostAttr = wrapperAttrs.back();
-  auto innermostNominal = evaluateOrDefault(
-      ctx.evaluator, CustomAttrNominalRequest{innermostAttr, dc}, nullptr);
-  if (!innermostNominal)
-    return nullptr;
-
-      // Walker
+PropertyWrapperValuePlaceholderExpr *
+swift::findWrappedValuePlaceholder(Expr *init) {
   class Walker : public ASTWalker {
   public:
-    NominalTypeDecl *innermostNominal;
-    Expr *initArg = nullptr;
-
-    Walker(NominalTypeDecl *innermostNominal)
-      : innermostNominal(innermostNominal) { }
+    PropertyWrapperValuePlaceholderExpr *placeholder = nullptr;
 
     virtual std::pair<bool, Expr *> walkToExprPre(Expr *E) override {
-      if (initArg)
+      if (placeholder)
         return { false, E };
 
-      if (auto call = dyn_cast<CallExpr>(E)) {
-        ASTContext &ctx = innermostNominal->getASTContext();
-
-        // We're looking for an implicit call.
-        if (!call->isImplicit())
-          return { true, E };
-
-        // ... which may call the constructor of another property
-        // wrapper if there are multiple wrappers attached to the
-        // property.
-        if (auto tuple = dyn_cast<TupleExpr>(call->getArg())) {
-          if (tuple->getNumElements() > 0) {
-            for (unsigned i : range(tuple->getNumElements())) {
-              if (tuple->getElementName(i) == ctx.Id_wrappedValue ||
-                  tuple->getElementName(i) == ctx.Id_initialValue) {
-                auto elem = tuple->getElement(i)->getSemanticsProvidingExpr();
-
-                // Look through autoclosures.
-                if (auto autoclosure = dyn_cast<AutoClosureExpr>(elem))
-                  elem = autoclosure->getSingleExpressionBody();
-
-                if (elem->isImplicit() && isa<CallExpr>(elem)) {
-                  return { true, E };
-                }
-              }
-            }
-          }
-        }
-
-        // ... producing a value of the same nominal type as the
-        // innermost property wrapper.
-        if (!call->getType() ||
-            call->getType()->getAnyNominal() != innermostNominal)
-          return { false, E };
-
-        // Find the implicit initialValue/wrappedValue argument.
-        if (auto tuple = dyn_cast<TupleExpr>(call->getArg())) {
-          for (unsigned i : range(tuple->getNumElements())) {
-            if (tuple->getElementName(i) == ctx.Id_wrappedValue ||
-                tuple->getElementName(i) == ctx.Id_initialValue) {
-              initArg = tuple->getElement(i);
-              return { false, E };
-            }
-          }
-        }
+      if (auto *value = dyn_cast<PropertyWrapperValuePlaceholderExpr>(E)) {
+        placeholder = value;
+        return { false, value };
       }
 
       return { true, E };
     }
-  } walker(innermostNominal);
+  } walker;
   init->walk(walker);
 
-  Expr *initArg = walker.initArg;
-  if (initArg) {
-    initArg = initArg->getSemanticsProvidingExpr();
-    if (auto autoclosure = dyn_cast<AutoClosureExpr>(initArg)) {
-      if (!var->isInnermostPropertyWrapperInitUsesEscapingAutoClosure()) {
-        // Remove the autoclosure part only for non-escaping autoclosures
-        initArg =
-            autoclosure->getSingleExpressionBody()->getSemanticsProvidingExpr();
-      }
-    }
-  }
-  return initArg;
+  return walker.placeholder;
 }
 
 /// Writes a tuple expression where each element is either `nil` or another such
@@ -6489,7 +6486,7 @@ ParamDecl::getDefaultValueStringRepresentation(
         }
 
         auto init =
-            findOriginalPropertyWrapperInitialValue(original, parentInit);
+            findWrappedValuePlaceholder(parentInit)->getOriginalWrappedValue();
         return extractInlinableText(getASTContext().SourceMgr, init, scratch);
       }
     }
@@ -6812,7 +6809,7 @@ AbstractFunctionDecl::getObjCSelector(DeclName preferredName,
     return destructor->getObjCSelector();
   } else if (auto func = dyn_cast<FuncDecl>(this)) {
     // Otherwise cast this to be able to access getName()
-    baseNameStr = func->getName().str();
+    baseNameStr = func->getBaseIdentifier().str();
   } else if (isa<ConstructorDecl>(this)) {
     baseNameStr = "init";
   } else {
@@ -7024,7 +7021,7 @@ Identifier OpaqueTypeDecl::getOpaqueReturnTypeIdentifier() const {
   {
     llvm::raw_svector_ostream os(mangleBuf);
     Mangle::ASTMangler mangler;
-    os << mangler.mangleDeclAsUSR(getNamingDecl(), MANGLING_PREFIX_STR);
+    os << mangler.mangleOpaqueTypeDecl(this);
   }
 
   OpaqueReturnTypeIdentifier = getASTContext().getIdentifier(mangleBuf);
@@ -7091,8 +7088,10 @@ AbstractFunctionDecl::getDerivativeFunctionConfigurations() {
   prepareDerivativeFunctionConfigurations();
   auto &ctx = getASTContext();
   if (ctx.getCurrentGeneration() > DerivativeFunctionConfigGeneration) {
-    // TODO(TF-1100): Upstream derivative function configuration serialization
-    // logic.
+    unsigned previousGeneration = DerivativeFunctionConfigGeneration;
+    DerivativeFunctionConfigGeneration = ctx.getCurrentGeneration();
+    ctx.loadDerivativeFunctionConfigurations(this, previousGeneration,
+                                             *DerivativeFunctionConfigs);
   }
   return DerivativeFunctionConfigs->getArrayRef();
 }
@@ -7272,6 +7271,12 @@ bool AccessorDecl::isExplicitNonMutating() const {
     !getDeclContext()->getDeclaredInterfaceType()->hasReferenceSemantics();
 }
 
+bool AccessorDecl::isSimpleDidSet() const {
+  auto mutableThis = const_cast<AccessorDecl *>(this);
+  return evaluateOrDefault(getASTContext().evaluator,
+                           SimpleDidSetRequest{mutableThis}, false);
+}
+
 StaticSpellingKind FuncDecl::getCorrectStaticSpelling() const {
   assert(getDeclContext()->isTypeContext());
   if (!isStatic())
@@ -7318,7 +7323,8 @@ SelfAccessKind FuncDecl::getSelfAccessKind() const {
 }
 
 bool FuncDecl::isCallAsFunctionMethod() const {
-  return getName() == getASTContext().Id_callAsFunction && isInstanceMember();
+  return getBaseIdentifier() == getASTContext().Id_callAsFunction &&
+         isInstanceMember();
 }
 
 ConstructorDecl::ConstructorDecl(DeclName Name, SourceLoc ConstructorLoc,
@@ -7478,7 +7484,7 @@ LiteralExpr *EnumElementDecl::getRawValueExpr() const {
   (void)evaluateOrDefault(
       getASTContext().evaluator,
       EnumRawValuesRequest{getParentEnum(), TypeResolutionStage::Interface},
-      true);
+      {});
   return RawValueExpr;
 }
 
@@ -7488,7 +7494,7 @@ LiteralExpr *EnumElementDecl::getStructuralRawValueExpr() const {
   (void)evaluateOrDefault(
       getASTContext().evaluator,
       EnumRawValuesRequest{getParentEnum(), TypeResolutionStage::Structural},
-      true);
+      {});
   return RawValueExpr;
 }
 
@@ -7815,7 +7821,7 @@ PrecedenceGroupDecl *InfixOperatorDecl::getPrecedenceGroup() const {
 }
 
 bool FuncDecl::isDeferBody() const {
-  return getName() == getASTContext().getIdentifier("$defer");
+  return getBaseIdentifier() == getASTContext().getIdentifier("$defer");
 }
 
 bool FuncDecl::isPotentialIBActionTarget() const {

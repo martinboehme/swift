@@ -2056,6 +2056,25 @@ public:
 /// does it have the given semantics?
 bool doesApplyCalleeHaveSemantics(SILValue callee, StringRef semantics);
 
+/// Predicate used to filter InoutArgumentRange.
+struct OperandToInoutArgument {
+  ArrayRef<SILParameterInfo> paramInfos;
+  OperandValueArrayRef arguments;
+  OperandToInoutArgument(ArrayRef<SILParameterInfo> paramInfos,
+                         OperandValueArrayRef arguments)
+      : paramInfos(paramInfos), arguments(arguments) {
+    assert(paramInfos.size() == arguments.size());
+  }
+  Optional<SILValue> operator()(size_t i) const {
+    if (paramInfos[i].isIndirectMutating())
+      return arguments[i];
+    return None;
+  }
+};
+
+using InoutArgumentRange =
+    OptionalTransformRange<IntRange<size_t>, OperandToInoutArgument>;
+
 /// The partial specialization of ApplyInstBase for full applications.
 /// Adds some methods relating to 'self' and to result types that don't
 /// make sense for partial applications.
@@ -2067,6 +2086,9 @@ protected:
   template <class... As>
   ApplyInstBase(As &&...args)
     : ApplyInstBase<Impl, Base, false>(std::forward<As>(args)...) {}
+
+private:
+  const Impl &asImpl() const { return static_cast<const Impl &>(*this); }
 
 public:
   using super::getCallee;
@@ -2150,6 +2172,16 @@ public:
 
   OperandValueArrayRef getArgumentsWithoutIndirectResults() const {
     return getArguments().slice(getNumIndirectResults());
+  }
+
+  /// Returns all `@inout` and `@inout_aliasable` arguments passed to the
+  /// instruction.
+  InoutArgumentRange getInoutArguments() const {
+    auto &impl = asImpl();
+    return InoutArgumentRange(
+        indices(getArgumentsWithoutIndirectResults()),
+        OperandToInoutArgument(impl.getSubstCalleeConv().getParameters(),
+                               impl.getArgumentsWithoutIndirectResults()));
   }
 
   bool hasSemantics(StringRef semanticsString) const {
@@ -4485,59 +4517,6 @@ class UncheckedRefCastInst final
          SILFunction &F, SILOpenedArchetypesState &OpenedArchetypes);
 };
 
-/// Converts a heap object reference to a different type without any runtime
-/// checks. This is a variant of UncheckedRefCast that works on address types,
-/// thus encapsulates an implicit load and take of the reference followed by a
-/// store and initialization of a new reference.
-class UncheckedRefCastAddrInst
-    : public InstructionBase<SILInstructionKind::UncheckedRefCastAddrInst,
-                             NonValueInstruction> {
-public:
-  enum {
-    /// the value being stored
-    Src,
-    /// the lvalue being stored to
-    Dest
-  };
-
-private:
-  FixedOperandList<2> Operands;
-  CanType SourceType;
-  CanType TargetType;
-public:
-  UncheckedRefCastAddrInst(SILDebugLocation Loc, SILValue src, CanType srcType,
-                           SILValue dest, CanType targetType);
-
-  SILValue getSrc() const { return Operands[Src].get(); }
-  SILValue getDest() const { return Operands[Dest].get(); }
-
-  SILType getSourceLoweredType() const { return getSrc()->getType(); }
-  CanType getSourceFormalType() const { return SourceType; }
-
-  SILType getTargetLoweredType() const { return getDest()->getType(); }
-  CanType getTargetFormalType() const { return TargetType; }
-
-  ArrayRef<Operand> getAllOperands() const { return Operands.asArray(); }
-  MutableArrayRef<Operand> getAllOperands() { return Operands.asArray(); }
-};
-
-class UncheckedAddrCastInst final
-  : public UnaryInstructionWithTypeDependentOperandsBase<
-                                SILInstructionKind::UncheckedAddrCastInst,
-                                UncheckedAddrCastInst,
-                                ConversionInst>
-{
-  friend SILBuilder;
-
-  UncheckedAddrCastInst(SILDebugLocation DebugLoc, SILValue Operand,
-                        ArrayRef<SILValue> TypeDependentOperands, SILType Ty)
-      : UnaryInstructionWithTypeDependentOperandsBase(DebugLoc, Operand,
-                                               TypeDependentOperands, Ty) {}
-  static UncheckedAddrCastInst *
-  create(SILDebugLocation DebugLoc, SILValue Operand, SILType Ty,
-         SILFunction &F, SILOpenedArchetypesState &OpenedArchetypes);
-};
-
 /// Convert a value's binary representation to a trivial type of the same size.
 class UncheckedTrivialBitCastInst final
   : public UnaryInstructionWithTypeDependentOperandsBase<
@@ -4809,41 +4788,6 @@ public:
 
   CanType getTargetFormalType() const { return DestFormalTy; }
   SILType getTargetLoweredType() const { return getType(); }
-};
-
-/// Perform an unconditional checked cast that aborts if the cast fails.
-/// The result of the checked cast is left in the destination address.
-class UnconditionalCheckedCastAddrInst
-    : public InstructionBase<SILInstructionKind::UnconditionalCheckedCastAddrInst,
-                             NonValueInstruction> {
-  friend SILBuilder;
-
-  enum {
-    /// the value being stored
-    Src,
-    /// the lvalue being stored to
-    Dest
-  };
-  FixedOperandList<2> Operands;
-  CanType SourceType;
-  CanType TargetType;
-
-  UnconditionalCheckedCastAddrInst(SILDebugLocation Loc,
-                                   SILValue src, CanType sourceType,
-                                   SILValue dest, CanType targetType);
-
-public:
-  SILValue getSrc() const { return Operands[Src].get(); }
-  SILValue getDest() const { return Operands[Dest].get(); }
-
-  SILType getSourceLoweredType() const { return getSrc()->getType(); }
-  CanType getSourceFormalType() const { return SourceType; }
-
-  SILType getTargetLoweredType() const { return getDest()->getType(); }
-  CanType getTargetFormalType() const { return TargetType; }
-
-  ArrayRef<Operand> getAllOperands() const { return Operands.asArray(); }
-  MutableArrayRef<Operand> getAllOperands() { return Operands.asArray(); }
 };
 
 /// Perform an unconditional checked cast that aborts if the cast fails.
@@ -7743,54 +7687,24 @@ public:
   MutableArrayRef<Operand> getAllOperands() { return Operands.asArray(); }
 };
 
-/// Perform a checked cast operation and branch on whether the cast succeeds.
-/// The success branch destination block receives the cast result as a BB
-/// argument.
-class CheckedCastBranchInst final:
-  public UnaryInstructionWithTypeDependentOperandsBase<
-                              SILInstructionKind::CheckedCastBranchInst,
-                              CheckedCastBranchInst,
-                              TermInst> {
-  friend SILBuilder;
-
-  SILType DestLoweredTy;
-  CanType DestFormalTy;
-  bool IsExact;
-
+/// The base class for cast instructions which are terminators.
+class CastBranchInstBase : public TermInst {
   std::array<SILSuccessor, 2> DestBBs;
 
-  CheckedCastBranchInst(SILDebugLocation DebugLoc, bool IsExact,
-                        SILValue Operand,
-                        ArrayRef<SILValue> TypeDependentOperands,
-                        SILType DestLoweredTy, CanType DestFormalTy,
-                        SILBasicBlock *SuccessBB, SILBasicBlock *FailureBB,
-                        ProfileCounter Target1Count, ProfileCounter Target2Count)
-      : UnaryInstructionWithTypeDependentOperandsBase(DebugLoc, Operand,
-                                                      TypeDependentOperands),
-        DestLoweredTy(DestLoweredTy),
-        DestFormalTy(DestFormalTy),
-        IsExact(IsExact), DestBBs{{{this, SuccessBB, Target1Count},
-                                   {this, FailureBB, Target2Count}}} {}
-
-  static CheckedCastBranchInst *
-  create(SILDebugLocation DebugLoc, bool IsExact, SILValue Operand,
-         SILType DestLoweredTy, CanType DestFormalTy,
-         SILBasicBlock *SuccessBB, SILBasicBlock *FailureBB,
-         SILFunction &F, SILOpenedArchetypesState &OpenedArchetypes,
-         ProfileCounter Target1Count, ProfileCounter Target2Count);
-
 public:
-  bool isExact() const { return IsExact; }
+
+  CastBranchInstBase(SILInstructionKind K, SILDebugLocation DebugLoc,
+                     SILBasicBlock *SuccessBB, SILBasicBlock *FailureBB,
+                     ProfileCounter Target1Count = ProfileCounter(),
+                     ProfileCounter Target2Count = ProfileCounter()) :
+    TermInst(K, DebugLoc),
+    DestBBs{{{this, SuccessBB, Target1Count},
+             {this, FailureBB, Target2Count}}}
+      {}
 
   SuccessorListTy getSuccessors() {
     return DestBBs;
   }
-
-  SILType getSourceLoweredType() const { return getOperand()->getType(); }
-  CanType getSourceFormalType() const { return getSourceLoweredType().getASTType(); }
-
-  SILType getTargetLoweredType() const { return DestLoweredTy; }
-  CanType getTargetFormalType() const { return DestFormalTy; }
 
   SILBasicBlock *getSuccessBB() { return DestBBs[0]; }
   const SILBasicBlock *getSuccessBB() const { return DestBBs[0]; }
@@ -7803,6 +7717,142 @@ public:
   ProfileCounter getFalseBBCount() const { return DestBBs[1].getCount(); }
 };
 
+/// The base class for cast instructions which are terminators and have a
+/// CastConsumptionKind.
+class CastBranchWithConsumptionKindBase : public CastBranchInstBase {
+  CastConsumptionKind ConsumptionKind;
+
+public:
+
+  CastBranchWithConsumptionKindBase(SILInstructionKind K, SILDebugLocation DebugLoc,
+                     CastConsumptionKind consumptionKind,
+                     SILBasicBlock *SuccessBB, SILBasicBlock *FailureBB,
+                     ProfileCounter Target1Count = ProfileCounter(),
+                     ProfileCounter Target2Count = ProfileCounter()) :
+    CastBranchInstBase(K, DebugLoc, SuccessBB, FailureBB,
+                       Target1Count, Target2Count),
+    ConsumptionKind(consumptionKind) {}
+
+  CastConsumptionKind getConsumptionKind() const { return ConsumptionKind; }
+};
+
+/// Helper base class for AddrCastInstBase.
+///
+/// Ideally, the types would just be a member of AddrCastInstBase. But because
+/// of tail-allocated operands, they need to be in a base class of
+/// InstructionBaseWithTrailingOperands.
+template<typename Base>
+class TypesForAddrCasts : public Base {
+  CanType SourceType;
+  CanType TargetType;
+
+public:
+  template <typename... Args>
+  TypesForAddrCasts(SILInstructionKind K, SILDebugLocation debugLoc,
+                    CanType SourceType, CanType TargetType,
+                    Args &&...args)
+      : Base(K, debugLoc, std::forward<Args>(args)...),
+        SourceType(SourceType), TargetType(TargetType) {}
+
+  CanType getSourceFormalType() const { return SourceType; }
+  CanType getTargetFormalType() const { return TargetType; }
+};
+
+/// Base class for cast instructions with address-type operands.
+template<SILInstructionKind Kind,
+         typename Derived,
+         typename Base>
+class AddrCastInstBase
+    : public InstructionBaseWithTrailingOperands<Kind, Derived,
+                                                 TypesForAddrCasts<Base>> {
+protected:
+  friend InstructionBaseWithTrailingOperands<Kind, Derived, Operand>;
+
+  using TrailingObjects =
+      InstructionBaseWithTrailingOperands<Kind, Derived, Operand>;
+
+public:
+  template <typename... Args>
+  AddrCastInstBase(SILDebugLocation debugLoc,
+                                       SILValue src, CanType srcType,
+                                       SILValue dest, CanType targetType,
+                                       ArrayRef<SILValue> typeDependentOperands,
+                                       Args &&...args)
+      : InstructionBaseWithTrailingOperands<Kind, Derived, TypesForAddrCasts<Base>> (
+                                              src, dest, typeDependentOperands,
+                                              debugLoc, srcType, targetType,
+                                              std::forward<Args>(args)...) {}
+
+  unsigned getNumTypeDependentOperands() const {
+    return this->getAllOperands().size() - 2;
+  }
+
+  ArrayRef<Operand> getTypeDependentOperands() const {
+    return this->getAllOperands().slice(2);
+  }
+
+  MutableArrayRef<Operand> getTypeDependentOperands() {
+    return this->getAllOperands().slice(2);
+  }
+
+  enum {
+    /// the value being stored
+    Src,
+    /// the lvalue being stored to
+    Dest
+  };
+
+  SILValue getSrc() const { return this->getAllOperands()[Src].get(); }
+  SILValue getDest() const { return this->getAllOperands()[Dest].get(); }
+
+  SILType getSourceLoweredType() const { return getSrc()->getType(); }
+  SILType getTargetLoweredType() const { return getDest()->getType(); }
+};
+
+/// Perform a checked cast operation and branch on whether the cast succeeds.
+/// The success branch destination block receives the cast result as a BB
+/// argument.
+class CheckedCastBranchInst final:
+  public UnaryInstructionWithTypeDependentOperandsBase<
+                              SILInstructionKind::CheckedCastBranchInst,
+                              CheckedCastBranchInst,
+                              CastBranchInstBase> {
+  friend SILBuilder;
+
+  SILType DestLoweredTy;
+  CanType DestFormalTy;
+  bool IsExact;
+
+  CheckedCastBranchInst(SILDebugLocation DebugLoc, bool IsExact,
+                        SILValue Operand,
+                        ArrayRef<SILValue> TypeDependentOperands,
+                        SILType DestLoweredTy, CanType DestFormalTy,
+                        SILBasicBlock *SuccessBB, SILBasicBlock *FailureBB,
+                        ProfileCounter Target1Count, ProfileCounter Target2Count)
+      : UnaryInstructionWithTypeDependentOperandsBase(DebugLoc, Operand,
+            TypeDependentOperands,
+            SuccessBB, FailureBB, Target1Count, Target2Count),
+        DestLoweredTy(DestLoweredTy),
+        DestFormalTy(DestFormalTy),
+        IsExact(IsExact) {}
+
+  static CheckedCastBranchInst *
+  create(SILDebugLocation DebugLoc, bool IsExact, SILValue Operand,
+         SILType DestLoweredTy, CanType DestFormalTy,
+         SILBasicBlock *SuccessBB, SILBasicBlock *FailureBB,
+         SILFunction &F, SILOpenedArchetypesState &OpenedArchetypes,
+         ProfileCounter Target1Count, ProfileCounter Target2Count);
+
+public:
+  bool isExact() const { return IsExact; }
+
+  SILType getSourceLoweredType() const { return getOperand()->getType(); }
+  CanType getSourceFormalType() const { return getSourceLoweredType().getASTType(); }
+
+  SILType getTargetLoweredType() const { return DestLoweredTy; }
+  CanType getTargetFormalType() const { return DestFormalTy; }
+};
+
 /// Perform a checked cast operation and branch on whether the cast succeeds.
 /// The success branch destination block receives the cast result as a BB
 /// argument.
@@ -7810,14 +7860,12 @@ class CheckedCastValueBranchInst final
     : public UnaryInstructionWithTypeDependentOperandsBase<
           SILInstructionKind::CheckedCastValueBranchInst,
           CheckedCastValueBranchInst,
-          TermInst> {
+          CastBranchInstBase> {
   friend SILBuilder;
 
   CanType SourceFormalTy;
   SILType DestLoweredTy;
   CanType DestFormalTy;
-
-  std::array<SILSuccessor, 2> DestBBs;
 
   CheckedCastValueBranchInst(SILDebugLocation DebugLoc,
                              SILValue Operand, CanType SourceFormalTy,
@@ -7825,10 +7873,9 @@ class CheckedCastValueBranchInst final
                              SILType DestLoweredTy, CanType DestFormalTy,
                              SILBasicBlock *SuccessBB, SILBasicBlock *FailureBB)
       : UnaryInstructionWithTypeDependentOperandsBase(DebugLoc, Operand,
-                                                      TypeDependentOperands),
+                                  TypeDependentOperands, SuccessBB, FailureBB),
         SourceFormalTy(SourceFormalTy),
-        DestLoweredTy(DestLoweredTy), DestFormalTy(DestFormalTy),
-        DestBBs{{{this, SuccessBB}, {this, FailureBB}}} {}
+        DestLoweredTy(DestLoweredTy), DestFormalTy(DestFormalTy) {}
 
   static CheckedCastValueBranchInst *
   create(SILDebugLocation DebugLoc,
@@ -7838,84 +7885,90 @@ class CheckedCastValueBranchInst final
          SILFunction &F, SILOpenedArchetypesState &OpenedArchetypes);
 
 public:
-  SuccessorListTy getSuccessors() { return DestBBs; }
-
   SILType getSourceLoweredType() const { return getOperand()->getType(); }
   CanType getSourceFormalType() const { return SourceFormalTy; }
 
   SILType getTargetLoweredType() const { return DestLoweredTy; }
   CanType getTargetFormalType() const { return DestFormalTy; }
-
-  SILBasicBlock *getSuccessBB() { return DestBBs[0]; }
-  const SILBasicBlock *getSuccessBB() const { return DestBBs[0]; }
-  SILBasicBlock *getFailureBB() { return DestBBs[1]; }
-  const SILBasicBlock *getFailureBB() const { return DestBBs[1]; }
 };
 
 /// Perform a checked cast operation and branch on whether the cast succeeds.
 /// The result of the checked cast is left in the destination address.
-class CheckedCastAddrBranchInst
-    : public InstructionBase<SILInstructionKind::CheckedCastAddrBranchInst,
-                             TermInst> {
+class CheckedCastAddrBranchInst final
+    : public AddrCastInstBase<
+              SILInstructionKind::CheckedCastAddrBranchInst,
+              CheckedCastAddrBranchInst, CastBranchWithConsumptionKindBase> {
   friend SILBuilder;
-
-  CastConsumptionKind ConsumptionKind;
-
-  FixedOperandList<2> Operands;
-  std::array<SILSuccessor, 2> DestBBs;
-
-  CanType SourceType;
-  CanType TargetType;
 
   CheckedCastAddrBranchInst(SILDebugLocation DebugLoc,
                             CastConsumptionKind consumptionKind, SILValue src,
                             CanType srcType, SILValue dest, CanType targetType,
+                            ArrayRef<SILValue> TypeDependentOperands,
                             SILBasicBlock *successBB, SILBasicBlock *failureBB,
                             ProfileCounter Target1Count,
-                            ProfileCounter Target2Count)
-      : InstructionBase(DebugLoc), ConsumptionKind(consumptionKind),
-        Operands{this, src, dest}, DestBBs{{{this, successBB, Target1Count},
-                                            {this, failureBB, Target2Count}}},
-        SourceType(srcType), TargetType(targetType) {
-    assert(ConsumptionKind != CastConsumptionKind::BorrowAlways &&
-           "BorrowAlways is not supported on addresses");
-  }
+                            ProfileCounter Target2Count);
 
+  static CheckedCastAddrBranchInst *
+  create(SILDebugLocation DebugLoc, CastConsumptionKind consumptionKind,
+         SILValue src, CanType srcType, SILValue dest, CanType targetType,
+         SILBasicBlock *successBB, SILBasicBlock *failureBB,
+         ProfileCounter Target1Count, ProfileCounter Target2Count,
+         SILFunction &F, SILOpenedArchetypesState &OpenedArchetypes);
+};
+
+/// Converts a heap object reference to a different type without any runtime
+/// checks. This is a variant of UncheckedRefCast that works on address types,
+/// thus encapsulates an implicit load and take of the reference followed by a
+/// store and initialization of a new reference.
+class UncheckedRefCastAddrInst final
+    : public AddrCastInstBase<
+               SILInstructionKind::UncheckedRefCastAddrInst,
+               UncheckedRefCastAddrInst, NonValueInstruction> {
 public:
-  enum {
-    /// the value being stored
-    Src,
-    /// the lvalue being stored to
-    Dest
-  };
+  UncheckedRefCastAddrInst(SILDebugLocation Loc, SILValue src, CanType srcType,
+                           SILValue dest, CanType targetType,
+                           ArrayRef<SILValue> TypeDependentOperands);
+  
+  static UncheckedRefCastAddrInst *
+  create(SILDebugLocation Loc, SILValue src, CanType srcType,
+         SILValue dest, CanType targetType,
+         SILFunction &F, SILOpenedArchetypesState &OpenedArchetypes);
+};
 
-  CastConsumptionKind getConsumptionKind() const { return ConsumptionKind; }
+class UncheckedAddrCastInst final
+  : public UnaryInstructionWithTypeDependentOperandsBase<
+                                SILInstructionKind::UncheckedAddrCastInst,
+                                UncheckedAddrCastInst,
+                                ConversionInst>
+{
+  friend SILBuilder;
 
-  SILValue getSrc() const { return Operands[Src].get(); }
-  SILValue getDest() const { return Operands[Dest].get(); }
+  UncheckedAddrCastInst(SILDebugLocation DebugLoc, SILValue Operand,
+                        ArrayRef<SILValue> TypeDependentOperands, SILType Ty)
+      : UnaryInstructionWithTypeDependentOperandsBase(DebugLoc, Operand,
+                                               TypeDependentOperands, Ty) {}
+  static UncheckedAddrCastInst *
+  create(SILDebugLocation DebugLoc, SILValue Operand, SILType Ty,
+         SILFunction &F, SILOpenedArchetypesState &OpenedArchetypes);
+};
 
-  SILType getSourceLoweredType() const { return getSrc()->getType(); }
-  CanType getSourceFormalType() const { return SourceType; }
+/// Perform an unconditional checked cast that aborts if the cast fails.
+/// The result of the checked cast is left in the destination address.
+class UnconditionalCheckedCastAddrInst final
+    : public AddrCastInstBase<
+               SILInstructionKind::UnconditionalCheckedCastAddrInst,
+               UnconditionalCheckedCastAddrInst, NonValueInstruction> {
+  friend SILBuilder;
 
-  SILType getTargetLoweredType() const { return getDest()->getType(); }
-  CanType getTargetFormalType() const { return TargetType; }
+  UnconditionalCheckedCastAddrInst(SILDebugLocation Loc,
+                                   SILValue src, CanType sourceType,
+                                   SILValue dest, CanType targetType,
+                                   ArrayRef<SILValue> TypeDependentOperands);
 
-  ArrayRef<Operand> getAllOperands() const { return Operands.asArray(); }
-  MutableArrayRef<Operand> getAllOperands() { return Operands.asArray(); }
-
-  SuccessorListTy getSuccessors() {
-    return DestBBs;
-  }
-
-  SILBasicBlock *getSuccessBB() { return DestBBs[0]; }
-  const SILBasicBlock *getSuccessBB() const { return DestBBs[0]; }
-  SILBasicBlock *getFailureBB() { return DestBBs[1]; }
-  const SILBasicBlock *getFailureBB() const { return DestBBs[1]; }
-
-  /// The number of times the True branch was executed.
-  ProfileCounter getTrueBBCount() const { return DestBBs[0].getCount(); }
-  /// The number of times the False branch was executed.
-  ProfileCounter getFalseBBCount() const { return DestBBs[1].getCount(); }
+  static UnconditionalCheckedCastAddrInst *
+  create(SILDebugLocation DebugLoc, SILValue src, CanType sourceType,
+         SILValue dest, CanType targetType,
+         SILFunction &F, SILOpenedArchetypesState &OpenedArchetypes);
 };
 
 /// A private abstract class to store the destinations of a TryApplyInst.
@@ -8057,6 +8110,45 @@ public:
   }
 };
 
+/// LinearFunctionInst - given a function, its derivative and traspose functions,
+/// create an `@differentiable(linear)` function that represents a bundle of these.
+class LinearFunctionInst final :
+    public InstructionBaseWithTrailingOperands<
+               SILInstructionKind::LinearFunctionInst,
+               LinearFunctionInst, OwnershipForwardingSingleValueInst> {
+private:
+  friend SILBuilder;
+  /// Parameters to differentiate with respect to.
+  IndexSubset *ParameterIndices;
+  /// Indicates whether a transpose function exists.
+  bool HasTransposeFunction;
+
+  static SILType getLinearFunctionType(
+      SILValue OriginalFunction, IndexSubset *ParameterIndices);
+
+public:
+  LinearFunctionInst(SILDebugLocation Loc, IndexSubset *ParameterIndices,
+                     SILValue OriginalFunction,
+                     Optional<SILValue> TransposeFunction, bool HasOwnership);
+
+  static LinearFunctionInst *create(SILModule &Module, SILDebugLocation Loc,
+                                    IndexSubset *ParameterIndices,
+                                    SILValue OriginalFunction,
+                                    Optional<SILValue> TransposeFunction,
+                                    bool HasOwnership);
+
+  IndexSubset *getParameterIndices() const { return ParameterIndices; }
+  bool hasTransposeFunction() const { return HasTransposeFunction; }
+  SILValue getOriginalFunction() const { return getOperand(0); }
+  Optional<SILValue> getOptionalTransposeFunction() const {
+    return HasTransposeFunction ? Optional<SILValue>(getOperand(1)) : None;
+  }
+  SILValue getTransposeFunction() const {
+    assert(HasTransposeFunction);
+    return getOperand(1);
+  }
+};
+
 /// DifferentiableFunctionExtractInst - extracts either the original or
 /// derivative function value from a `@differentiable` function.
 class DifferentiableFunctionExtractInst
@@ -8092,6 +8184,39 @@ public:
   }
 
   bool hasExplicitExtracteeType() const { return HasExplicitExtracteeType; }
+};
+
+/// LinearFunctionExtractInst - given an `@differentiable(linear)` function
+/// representing a bundle of the original function and the transpose function,
+/// extract the specified function.
+class LinearFunctionExtractInst
+    : public InstructionBase<
+          SILInstructionKind::LinearFunctionExtractInst,
+          SingleValueInstruction> {
+private:
+  /// The extractee.
+  LinearDifferentiableFunctionTypeComponent extractee;
+  /// The list containing the `@differentiable(linear)` function operand.
+  FixedOperandList<1> operands;
+
+  static SILType
+  getExtracteeType(SILValue function,
+                   LinearDifferentiableFunctionTypeComponent extractee,
+                   SILModule &module);
+
+public:
+  explicit LinearFunctionExtractInst(
+      SILModule &module, SILDebugLocation debugLoc,
+      LinearDifferentiableFunctionTypeComponent extractee,
+      SILValue theFunction);
+
+  LinearDifferentiableFunctionTypeComponent getExtractee() const {
+    return extractee;
+  }
+
+  SILValue getFunctionOperand() const { return operands[0].get(); }
+  ArrayRef<Operand> getAllOperands() const { return operands.asArray(); }
+  MutableArrayRef<Operand> getAllOperands() { return operands.asArray(); }
 };
 
 /// DifferentiabilityWitnessFunctionInst - Looks up a differentiability witness

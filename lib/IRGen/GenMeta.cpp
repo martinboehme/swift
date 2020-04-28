@@ -1741,7 +1741,12 @@ namespace {
         auto underlyingConformance = conformance
           .subst(O->getUnderlyingInterfaceType(),
                  *O->getUnderlyingTypeSubstitutions());
-        
+
+        // Skip protocols without Witness tables, e.g. @objc protocols.
+        if (!Lowering::TypeConverter::protocolRequiresWitnessTable(
+                underlyingConformance.getRequirement()))
+          continue;
+
         auto witnessTableRef = IGM.emitWitnessTableRefString(
                                           underlyingType, underlyingConformance,
                                           contextSig,
@@ -3425,7 +3430,7 @@ void IRGenFunction::setInvariantLoad(llvm::LoadInst *load) {
 void IRGenFunction::setDereferenceableLoad(llvm::LoadInst *load,
                                            unsigned size) {
   auto sizeConstant = llvm::ConstantInt::get(IGM.Int64Ty, size);
-  auto sizeNode = llvm::MDNode::get(IGM.LLVMContext,
+  auto sizeNode = llvm::MDNode::get(IGM.getLLVMContext(),
                                   llvm::ConstantAsMetadata::get(sizeConstant));
   load->setMetadata(IGM.DereferenceableID, sizeNode);
 }
@@ -4634,6 +4639,7 @@ SpecialProtocol irgen::getSpecialProtocolID(ProtocolDecl *P) {
   case KnownProtocolKind::Encodable:
   case KnownProtocolKind::Decodable:
   case KnownProtocolKind::StringInterpolationProtocol:
+  case KnownProtocolKind::AdditiveArithmetic:
   case KnownProtocolKind::Differentiable:
     return SpecialProtocol::None;
   }

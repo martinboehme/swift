@@ -311,6 +311,7 @@ ConcreteDeclRef Expr::getReferencedDecl(bool stopAtParenExpr) const {
   PASS_THROUGH_REFERENCE(RebindSelfInConstructor, getSubExpr);
 
   NO_REFERENCE(OpaqueValue);
+  NO_REFERENCE(PropertyWrapperValuePlaceholder);
   NO_REFERENCE(DefaultArgument);
 
   PASS_THROUGH_REFERENCE(BindOptional, getSubExpr);
@@ -349,6 +350,11 @@ ConcreteDeclRef Expr::getReferencedDecl(bool stopAtParenExpr) const {
   PASS_THROUGH_REFERENCE(PointerToPointer, getSubExpr);
   PASS_THROUGH_REFERENCE(ForeignObjectConversion, getSubExpr);
   PASS_THROUGH_REFERENCE(UnevaluatedInstance, getSubExpr);
+  PASS_THROUGH_REFERENCE(DifferentiableFunction, getSubExpr);
+  PASS_THROUGH_REFERENCE(LinearFunction, getSubExpr);
+  PASS_THROUGH_REFERENCE(DifferentiableFunctionExtractOriginal, getSubExpr);
+  PASS_THROUGH_REFERENCE(LinearFunctionExtractOriginal, getSubExpr);
+  PASS_THROUGH_REFERENCE(LinearToDifferentiableFunction, getSubExpr);
   PASS_THROUGH_REFERENCE(BridgeToObjC, getSubExpr);
   PASS_THROUGH_REFERENCE(BridgeFromObjC, getSubExpr);
   PASS_THROUGH_REFERENCE(ConditionalBridgeFromObjC, getSubExpr);
@@ -619,6 +625,7 @@ bool Expr::canAppendPostfixExpression(bool appendingPostfixOperator) const {
 
   case ExprKind::RebindSelfInConstructor:
   case ExprKind::OpaqueValue:
+  case ExprKind::PropertyWrapperValuePlaceholder:
   case ExprKind::DefaultArgument:
   case ExprKind::BindOptional:
   case ExprKind::OptionalEvaluation:
@@ -667,6 +674,11 @@ bool Expr::canAppendPostfixExpression(bool appendingPostfixOperator) const {
   case ExprKind::PointerToPointer:
   case ExprKind::ForeignObjectConversion:
   case ExprKind::UnevaluatedInstance:
+  case ExprKind::DifferentiableFunction:
+  case ExprKind::LinearFunction:
+  case ExprKind::DifferentiableFunctionExtractOriginal:
+  case ExprKind::LinearFunctionExtractOriginal:
+  case ExprKind::LinearToDifferentiableFunction:
   case ExprKind::EnumIsCase:
   case ExprKind::ConditionalBridgeFromObjC:
   case ExprKind::BridgeFromObjC:
@@ -1391,6 +1403,17 @@ static ValueDecl *getCalledValue(Expr *E) {
     return getCalledValue(E2);
 
   return nullptr;
+}
+
+PropertyWrapperValuePlaceholderExpr *
+PropertyWrapperValuePlaceholderExpr::create(ASTContext &ctx, SourceRange range,
+                                            Type ty, Expr *wrappedValue) {
+  auto *placeholder =
+      new (ctx) OpaqueValueExpr(range, ty, /*isPlaceholder=*/true);
+
+  return new (ctx) PropertyWrapperValuePlaceholderExpr(range, ty,
+                                                       placeholder,
+                                                       wrappedValue);
 }
 
 const ParamDecl *DefaultArgumentExpr::getParamDecl() const {

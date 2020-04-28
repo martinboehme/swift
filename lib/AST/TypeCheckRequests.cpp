@@ -157,6 +157,29 @@ void SuperclassTypeRequest::cacheResult(Type value) const {
     protocolDecl->LazySemanticInfo.SuperclassType.setPointerAndInt(value, true);
 }
 
+evaluator::DependencySource
+SuperclassTypeRequest::readDependencySource(Evaluator &e) const {
+  const auto access = std::get<0>(getStorage())->getFormalAccess();
+  return {
+    e.getActiveDependencySourceOrNull(),
+    evaluator::getScopeForAccessLevel(access)
+  };
+}
+
+void SuperclassTypeRequest::writeDependencySink(Evaluator &eval,
+                                                ReferencedNameTracker &tracker,
+                                                Type value) const {
+  if (!value)
+    return;
+
+  // FIXME: This is compatible with the existing name tracking scheme, but
+  // ignoring this name when we fail to look up a class is bogus.
+  ClassDecl *Super = value->getClassOrBoundGenericClass();
+  if (!Super)
+    return;
+  tracker.addUsedMember({Super, Identifier()}, eval.isActiveSourceCascading());
+}
+
 //----------------------------------------------------------------------------//
 // Enum raw type computation.
 //----------------------------------------------------------------------------//
@@ -550,6 +573,11 @@ bool PropertyWrapperMutabilityRequest::isCached() const {
   return !var->getAttrs().isEmpty();
 }
 
+bool PropertyWrapperLValuenessRequest::isCached() const {
+  auto var = std::get<0>(getStorage());
+  return !var->getAttrs().isEmpty();
+}
+
 void swift::simple_display(
     llvm::raw_ostream &out, const PropertyWrapperTypeInfo &propertyWrapper) {
   out << "{ ";
@@ -592,9 +620,51 @@ void swift::simple_display(llvm::raw_ostream &os, PropertyWrapperMutability m) {
   os << "getter " << names[m.Getter] << ", setter " << names[m.Setter];
 }
 
+void swift::simple_display(llvm::raw_ostream &out, PropertyWrapperLValueness l) {
+  out << "is lvalue for get: {";
+  simple_display(out, l.isLValueForGetAccess);
+  out << "}, is lvalue for set: {";
+  simple_display(out, l.isLValueForSetAccess);
+  out << "}";
+}
+
 void swift::simple_display(llvm::raw_ostream &out,
-                           const ResilienceExpansion &value) {
-  out << value;
+                           ResilienceExpansion value) {
+  switch (value) {
+  case ResilienceExpansion::Minimal:
+    out << "minimal";
+    break;
+  case ResilienceExpansion::Maximal:
+    out << "maximal";
+    break;
+  }
+}
+
+void swift::simple_display(llvm::raw_ostream &out,
+                           FragileFunctionKind value) {
+  switch (value.kind) {
+  case FragileFunctionKind::Transparent:
+    out << "transparent";
+    break;
+  case FragileFunctionKind::Inlinable:
+    out << "inlinable";
+    break;
+  case FragileFunctionKind::AlwaysEmitIntoClient:
+    out << "alwaysEmitIntoClient";
+    break;
+  case FragileFunctionKind::DefaultArgument:
+    out << "defaultArgument";
+    break;
+  case FragileFunctionKind::PropertyInitializer:
+    out << "propertyInitializer";
+    break;
+  case FragileFunctionKind::None:
+    out << "none";
+    break;
+  }
+
+  out << ", allowUsableFromInline: "
+      << (value.allowUsableFromInline ? "true" : "false");
 }
 
 //----------------------------------------------------------------------------//
@@ -863,14 +933,14 @@ bool EnumRawValuesRequest::isCached() const {
   return std::get<1>(getStorage()) == TypeResolutionStage::Interface;
 }
 
-Optional<bool> EnumRawValuesRequest::getCachedResult() const {
+Optional<evaluator::SideEffect> EnumRawValuesRequest::getCachedResult() const {
   auto *ED = std::get<0>(getStorage());
   if (ED->LazySemanticInfo.hasCheckedRawValues())
-    return true;
+    return std::make_tuple<>();
   return None;
 }
 
-void EnumRawValuesRequest::cacheResult(bool) const {
+void EnumRawValuesRequest::cacheResult(evaluator::SideEffect) const {
   auto *ED = std::get<0>(getStorage());
   auto flags = ED->LazySemanticInfo.RawTypeAndFlags.getInt() |
       EnumDecl::HasFixedRawValues |
@@ -885,7 +955,7 @@ void EnumRawValuesRequest::diagnoseCycle(DiagnosticEngine &diags) const {
 }
 
 void EnumRawValuesRequest::noteCycleStep(DiagnosticEngine &diags) const {
-
+  
 }
 
 //----------------------------------------------------------------------------//
@@ -1265,18 +1335,125 @@ void DifferentiableAttributeTypeCheckRequest::cacheResult(
 }
 
 //----------------------------------------------------------------------------//
+// CheckRedeclarationRequest computation.
+//----------------------------------------------------------------------------//
+
+Optional<evaluator::SideEffect>
+CheckRedeclarationRequest::getCachedResult() const {
+  if (!std::get<0>(getStorage())->alreadyCheckedRedeclaration())
+    return None;
+  return std::make_tuple<>();
+}
+
+void CheckRedeclarationRequest::cacheResult(evaluator::SideEffect) const {
+  std::get<0>(getStorage())->setCheckedRedeclaration();
+}
+
+evaluator::DependencySource
+CheckRedeclarationRequest::readDependencySource(Evaluator &eval) const {
+  auto *current = std::get<0>(getStorage());
+  auto *currentDC = current->getDeclContext();
+  return {
+    currentDC->getParentSourceFile(),
+    evaluator::getScopeForAccessLevel(current->getFormalAccess())
+  };
+}
+
+void CheckRedeclarationRequest::writeDependencySink(
+    Evaluator &eval, ReferencedNameTracker &tracker,
+    evaluator::SideEffect) const {
+  auto *current = std::get<0>(getStorage());
+  if (!current->hasName())
+    return;
+
+  DeclContext *currentDC = current->getDeclContext();
+  SourceFile *currentFile = currentDC->getParentSourceFile();
+  if (!currentFile || currentDC->isLocalContext())
+    return;
+
+  if (currentDC->isTypeContext()) {
+    if (auto nominal = currentDC->getSelfNominalTypeDecl()) {
+      tracker.addUsedMember({nominal, current->getBaseName()},
+                            eval.isActiveSourceCascading());
+    }
+  } else {
+    tracker.addTopLevelName(current->getBaseName(),
+                            eval.isActiveSourceCascading());
+  }
+}
+
+//----------------------------------------------------------------------------//
+// LookupAllConformancesInContextRequest computation.
+//----------------------------------------------------------------------------//
+
+evaluator::DependencySource
+LookupAllConformancesInContextRequest::readDependencySource(
+    Evaluator &eval) const {
+  auto *dc = std::get<0>(getStorage());
+  AccessLevel defaultAccess;
+  if (auto ext = dyn_cast<ExtensionDecl>(dc)) {
+    const NominalTypeDecl *nominal = ext->getExtendedNominal();
+    if (!nominal) {
+      return {
+        eval.getActiveDependencySourceOrNull(),
+        evaluator::DependencyScope::Cascading
+      };
+    }
+    defaultAccess = nominal->getFormalAccess();
+  } else {
+    defaultAccess = cast<NominalTypeDecl>(dc)->getFormalAccess();
+  }
+  return {
+    eval.getActiveDependencySourceOrNull(),
+    evaluator::getScopeForAccessLevel(defaultAccess)
+  };
+}
+
+void LookupAllConformancesInContextRequest::writeDependencySink(
+    Evaluator &eval, ReferencedNameTracker &tracker,
+    ProtocolConformanceLookupResult conformances) const {
+  for (auto conformance : conformances) {
+    tracker.addUsedMember({conformance->getProtocol(), Identifier()},
+                          eval.isActiveSourceCascading());
+  }
+}
+
+//----------------------------------------------------------------------------//
+// ResolveTypeEraserTypeRequest computation.
+//----------------------------------------------------------------------------//
+
+Optional<Type> ResolveTypeEraserTypeRequest::getCachedResult() const {
+  auto ty = std::get<1>(getStorage())->TypeEraserLoc.getType();
+  if (ty.isNull()) {
+    return None;
+  }
+  return ty;
+}
+
+void ResolveTypeEraserTypeRequest::cacheResult(Type value) const {
+  assert(value && "Resolved type erasure type to null type!");
+  std::get<1>(getStorage())->TypeEraserLoc.setType(value);
+}
+
+//----------------------------------------------------------------------------//
 // TypeCheckSourceFileRequest computation.
 //----------------------------------------------------------------------------//
 
-Optional<bool> TypeCheckSourceFileRequest::getCachedResult() const {
+evaluator::DependencySource
+TypeCheckSourceFileRequest::readDependencySource(Evaluator &e) const {
+  return {std::get<0>(getStorage()), evaluator::DependencyScope::Cascading};
+}
+
+Optional<evaluator::SideEffect>
+TypeCheckSourceFileRequest::getCachedResult() const {
   auto *SF = std::get<0>(getStorage());
   if (SF->ASTStage == SourceFile::TypeChecked)
-    return true;
+    return std::make_tuple<>();
 
   return None;
 }
 
-void TypeCheckSourceFileRequest::cacheResult(bool result) const {
+void TypeCheckSourceFileRequest::cacheResult(evaluator::SideEffect) const {
   auto *SF = std::get<0>(getStorage());
 
   // Verify that we've checked types correctly.
@@ -1307,4 +1484,18 @@ void TypeCheckSourceFileRequest::cacheResult(bool result) const {
     }
 #endif
   }
+}
+
+//----------------------------------------------------------------------------//
+// TypeCheckFunctionBodyUntilRequest computation.
+//----------------------------------------------------------------------------//
+
+evaluator::DependencySource
+TypeCheckFunctionBodyUntilRequest::readDependencySource(Evaluator &e) const {
+  // We're going under a function body scope, unconditionally flip the scope
+  // to private.
+  return {
+    std::get<0>(getStorage())->getParentSourceFile(),
+    evaluator::DependencyScope::Private
+  };
 }

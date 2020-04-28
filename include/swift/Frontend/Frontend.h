@@ -31,6 +31,7 @@
 #include "swift/Basic/SourceManager.h"
 #include "swift/ClangImporter/ClangImporter.h"
 #include "swift/ClangImporter/ClangImporterOptions.h"
+#include "swift/Frontend/DiagnosticVerifier.h"
 #include "swift/Frontend/FrontendOptions.h"
 #include "swift/Frontend/ModuleInterfaceSupport.h"
 #include "swift/Migrator/MigratorOptions.h"
@@ -385,9 +386,25 @@ public:
 
   std::string getLdAddCFileOutputPathForWholeModule() const;
 
+public:
+  /// Given the current configuration of this frontend invocation, a set of
+  /// supplementary output paths, and a module, compute the appropriate set of
+  /// serialization options.
+  ///
+  /// FIXME: The \p module parameter supports the
+  /// \c SerializeOptionsForDebugging hack.
   SerializationOptions
   computeSerializationOptions(const SupplementaryOutputPaths &outs,
-                              bool moduleIsPublic) const;
+                              const ModuleDecl *module) const;
+
+  /// Returns an approximation of whether the given module could be
+  /// redistributed and consumed by external clients.
+  ///
+  /// FIXME: The scope of this computation should be limited entirely to
+  /// PrintAsObjC. Unfortunately, it has been co-opted to support the
+  /// \c SerializeOptionsForDebugging hack. Once this information can be
+  /// transferred from module files to the dSYMs, remove this.
+  bool isModuleExternallyConsumed(const ModuleDecl *mod) const;
 };
 
 /// A class which manages the state and execution of the compiler.
@@ -405,6 +422,7 @@ class CompilerInstance {
   std::unique_ptr<ASTContext> Context;
   std::unique_ptr<Lowering::TypeConverter> TheSILTypes;
   std::unique_ptr<SILModule> TheSILModule;
+  std::unique_ptr<DiagnosticVerifier> DiagVerifier;
 
   /// Null if no tracker.
   std::unique_ptr<DependencyTracker> DepTracker;
@@ -553,9 +571,7 @@ public:
   /// Returns true if there was an error during setup.
   bool setup(const CompilerInvocation &Invocation);
 
-  const CompilerInvocation &getInvocation() {
-    return Invocation;
-  }
+  const CompilerInvocation &getInvocation() const { return Invocation; }
 
   /// If a code completion buffer has been set, returns the corresponding source
   /// file.
@@ -585,6 +601,7 @@ private:
   bool setUpInputs();
   bool setUpASTContextIfNeeded();
   void setupStatsReporter();
+  void setupDiagnosticVerifierIfNeeded();
   Optional<unsigned> setUpCodeCompletionBuffer();
 
   /// Set up all state in the CompilerInstance to process the given input file.
@@ -623,7 +640,7 @@ public:
   void performParseOnly(bool EvaluateConditionals = false,
                         bool CanDelayBodies = true);
 
-  /// Parses and performs name binding on all input files.
+  /// Parses and performs import resolution on all input files.
   ///
   /// This is similar to a parse-only invocation, but module imports will also
   /// be processed.

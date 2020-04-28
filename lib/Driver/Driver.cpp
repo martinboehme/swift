@@ -883,6 +883,10 @@ Driver::buildCompilation(const ToolChain &TC,
   assert(OI.CompilerOutputType != file_types::ID::TY_INVALID &&
          "buildOutputInfo() must set a valid output type!");
 
+  TC.validateOutputInfo(Diags, OI);
+  if (Diags.hadAnyError())
+    return nullptr;
+
   validateEmbedBitcode(*TranslatedArgList, OI, Diags);
 
   if (OI.CompilerMode == OutputInfo::Mode::REPL)
@@ -2107,11 +2111,21 @@ void Driver::buildActions(SmallVectorImpl<const Action *> &TopLevelActions,
     // On ELF platforms there's no built in autolinking mechanism, so we
     // pull the info we need from the .o files directly and pass them as an
     // argument input file to the linker.
+    const auto &Triple = TC.getTriple();
     SmallVector<const Action *, 2> AutolinkExtractInputs;
     for (const Action *A : AllLinkerInputs)
-      if (A->getType() == file_types::TY_Object)
+      if (A->getType() == file_types::TY_Object) {
+        // Shared objects on ELF platforms don't have a swift1_autolink_entries
+        // section in them because the section in the .o files is marked as
+        // SHF_EXCLUDE.
+        if (auto *IA = dyn_cast<InputAction>(A)) {
+          StringRef ObjectName = IA->getInputArg().getValue();
+          if (Triple.getObjectFormat() == llvm::Triple::ELF &&
+              ObjectName.endswith(".so"))
+            continue;
+        }
         AutolinkExtractInputs.push_back(A);
-    const auto &Triple = TC.getTriple();
+      }
     const bool AutolinkExtractRequired =
         (Triple.getObjectFormat() == llvm::Triple::ELF && !Triple.isPS4()) ||
         Triple.getObjectFormat() == llvm::Triple::Wasm ||
@@ -2830,15 +2844,16 @@ Job *Driver::buildJobsForAction(Compilation &C, const JobAction *JA,
       << "\" - \"" << llvm::sys::path::filename(J->getExecutable())
       << "\", inputs: [";
 
-    interleave(InputActions.begin(), InputActions.end(),
-               [](const Action *A) {
-                 auto Input = cast<InputAction>(A);
-                 llvm::outs() << '"' << Input->getInputArg().getValue() << '"';
-               },
-               [] { llvm::outs() << ", "; });
+    llvm::interleave(
+        InputActions.begin(), InputActions.end(),
+        [](const Action *A) {
+          auto Input = cast<InputAction>(A);
+          llvm::outs() << '"' << Input->getInputArg().getValue() << '"';
+        },
+        [] { llvm::outs() << ", "; });
     if (!InputActions.empty() && !J->getInputs().empty())
       llvm::outs() << ", ";
-    interleave(
+    llvm::interleave(
         J->getInputs().begin(), J->getInputs().end(),
         [](const Job *Input) {
           auto FileNames = Input->getOutput().getPrimaryOutputFilenames();
@@ -3291,9 +3306,10 @@ static unsigned printActions(const Action *A,
     os << "\"" << IA->getInputArg().getValue() << "\"";
   } else {
     os << "{";
-    interleave(*cast<JobAction>(A),
-               [&](const Action *Input) { os << printActions(Input, Ids); },
-               [&] { os << ", "; });
+    llvm::interleave(
+        *cast<JobAction>(A),
+        [&](const Action *Input) { os << printActions(Input, Ids); },
+        [&] { os << ", "; });
     os << "}";
   }
 

@@ -113,6 +113,17 @@ namespace {
     }
   };
 
+  class PrettySupplementalDeclNameTrace : public llvm::PrettyStackTraceEntry {
+    DeclName name;
+  public:
+    PrettySupplementalDeclNameTrace(DeclName name)
+      : name(name) { }
+
+    void print(raw_ostream &os) const override {
+      os << "    ...decl is named '" << name << "'\n";
+    }
+  };
+
   class PrettyXRefTrace :
       public llvm::PrettyStackTraceEntry,
       public XRefTracePath {
@@ -156,6 +167,8 @@ static void skipRecord(llvm::BitstreamCursor &cursor, unsigned recordKind) {
 void ModuleFile::fatal(llvm::Error error) {
   if (FileContext) {
     getContext().Diags.diagnose(SourceLoc(), diag::serialization_fatal, Name);
+    getContext().Diags.diagnose(SourceLoc(), diag::serialization_misc_version,
+      Name, MiscVersion);
 
     if (!CompatibilityVersion.empty()) {
       if (getContext().LangOpts.EffectiveLanguageVersion
@@ -2013,7 +2026,7 @@ ModuleDecl *ModuleFile::getModule(ArrayRef<Identifier> name,
   if (name.empty() || name.front().empty())
     return getContext().TheBuiltinModule;
 
-  // FIXME: duplicated from NameBinder::getModule
+  // FIXME: duplicated from ImportResolver::getModule
   if (name.size() == 1 &&
       name.front() == FileContext->getParentModule()->getName()) {
     if (!UnderlyingModule && allowLoading) {
@@ -2193,6 +2206,8 @@ getActualReadWriteImplKind(unsigned rawKind) {
   CASE(MutableAddress)
   CASE(MaterializeToTemporary)
   CASE(Modify)
+  CASE(StoredWithSimpleDidSet)
+  CASE(InheritedWithSimpleDidSet)
 #undef CASE
   }
   return None;
@@ -2419,6 +2434,7 @@ public:
                                              rawAccessLevel, dependencyIDs);
 
     Identifier name = MF.getIdentifier(nameID);
+    PrettySupplementalDeclNameTrace trace(name);
 
     for (TypeID dependencyID : dependencyIDs) {
       auto dependency = MF.getTypeChecked(dependencyID);
@@ -2549,6 +2565,7 @@ public:
                                           rawInheritedAndDependencyIDs);
 
     Identifier name = MF.getIdentifier(nameID);
+    PrettySupplementalDeclNameTrace trace(name);
 
     for (TypeID dependencyID :
            rawInheritedAndDependencyIDs.slice(numInheritedTypes)) {
@@ -2626,6 +2643,7 @@ public:
     for (auto argNameID : argNameAndDependencyIDs.slice(0, numArgNames))
       argNames.push_back(MF.getIdentifier(argNameID));
     DeclName name(ctx, DeclBaseName::createConstructor(), argNames);
+    PrettySupplementalDeclNameTrace trace(name);
 
     Optional<swift::CtorInitializerKind> initKind =
         getActualCtorInitializerKind(storedInitKind);
@@ -2756,6 +2774,7 @@ public:
                                        arrayFieldIDs);
 
     Identifier name = MF.getIdentifier(nameID);
+    PrettySupplementalDeclNameTrace trace(name);
 
     auto getErrorFlags = [&]() {
       // Stored properties in classes still impact class object layout because
@@ -2926,6 +2945,10 @@ public:
                                          interfaceTypeID, isIUO, isVariadic,
                                          isAutoClosure, rawDefaultArg);
 
+    auto argName = MF.getIdentifier(argNameID);
+    auto paramName = MF.getIdentifier(paramNameID);
+    PrettySupplementalDeclNameTrace trace(paramName);
+
     auto DC = MF.getDeclContext(contextID);
     if (declOrOffset.isComplete())
       return declOrOffset;
@@ -2935,10 +2958,8 @@ public:
     if (!specifier)
       MF.fatal();
 
-    auto param = MF.createDecl<ParamDecl>(SourceLoc(), SourceLoc(),
-                                          MF.getIdentifier(argNameID),
-                                          SourceLoc(),
-                                          MF.getIdentifier(paramNameID), DC);
+    auto param = MF.createDecl<ParamDecl>(SourceLoc(), SourceLoc(), argName,
+                                          SourceLoc(), paramName, DC);
     param->setSpecifier(*specifier);
 
     declOrOffset = param;
@@ -3070,6 +3091,7 @@ public:
         dependencyIDs = nameAndDependencyIDs.drop_front();
       }
     }
+    PrettySupplementalDeclNameTrace trace(name);
 
     Expected<Decl *> overriddenOrError = MF.getDeclChecked(overriddenID);
     Decl *overridden;
@@ -3210,11 +3232,11 @@ public:
     TypeID interfaceTypeID;
     GenericSignatureID genericSigID;
     SubstitutionMapID underlyingTypeID;
-    
+    uint8_t rawAccessLevel;
     decls_block::OpaqueTypeLayout::readRecord(scratch, contextID,
                                               namingDeclID, interfaceSigID,
                                               interfaceTypeID, genericSigID,
-                                              underlyingTypeID);
+                                              underlyingTypeID, rawAccessLevel);
     
     auto declContext = MF.getDeclContext(contextID);
     auto interfaceSig = MF.getGenericSignature(interfaceSigID);
@@ -3233,6 +3255,11 @@ public:
 
     auto namingDecl = cast<ValueDecl>(MF.getDecl(namingDeclID));
     opaqueDecl->setNamingDecl(namingDecl);
+
+    if (auto accessLevel = getActualAccessLevel(rawAccessLevel))
+      opaqueDecl->setAccess(*accessLevel);
+    else
+      MF.fatal();
 
     if (auto genericParams = MF.maybeReadGenericParams(opaqueDecl)) {
       ctx.evaluator.cacheOutput(GenericParamListRequest{opaqueDecl},
@@ -3331,6 +3358,7 @@ public:
                                             rawInheritedAndDependencyIDs);
 
     Identifier name = MF.getIdentifier(nameID);
+    PrettySupplementalDeclNameTrace trace(name);
 
     for (TypeID dependencyID :
            rawInheritedAndDependencyIDs.slice(numInheritedTypes)) {
@@ -3390,6 +3418,10 @@ public:
 
     OperatorLayout::readRecord(scratch, nameID, contextID,
                                designatedNominalTypeDeclIDs);
+
+    Identifier name = MF.getIdentifier(nameID);
+    PrettySupplementalDeclNameTrace trace(name);
+
     auto DC = MF.getDeclContext(contextID);
 
     SmallVector<NominalTypeDecl *, 1> designatedNominalTypes;
@@ -3401,7 +3433,7 @@ public:
     }
 
     auto result = MF.createDecl<OperatorDecl>(
-        DC, SourceLoc(), MF.getIdentifier(nameID), SourceLoc(),
+        DC, SourceLoc(), name, SourceLoc(),
         ctx.AllocateCopy(designatedNominalTypes));
 
     declOrOffset = result;
@@ -3430,6 +3462,8 @@ public:
     decls_block::InfixOperatorLayout::readRecord(scratch, nameID, contextID,
                                                  precedenceGroupID,
                                                  designatedNominalTypeDeclIDs);
+    Identifier name = MF.getIdentifier(nameID);
+    PrettySupplementalDeclNameTrace trace(name);
 
     Expected<Decl *> precedenceGroup = MF.getDeclChecked(precedenceGroupID);
     if (!precedenceGroup)
@@ -3446,7 +3480,7 @@ public:
     }
 
     auto result = MF.createDecl<InfixOperatorDecl>(
-        DC, SourceLoc(), MF.getIdentifier(nameID), SourceLoc(), SourceLoc(),
+        DC, SourceLoc(), name, SourceLoc(), SourceLoc(),
         ArrayRef<Identifier>{}, ArrayRef<SourceLoc>{});
     result->setDesignatedNominalTypes(ctx.AllocateCopy(designatedNominalTypes));
     ctx.evaluator.cacheOutput(
@@ -3537,6 +3571,7 @@ public:
                                          rawInheritedAndDependencyIDs);
 
     Identifier name = MF.getIdentifier(nameID);
+    PrettySupplementalDeclNameTrace trace(name);
 
     for (TypeID dependencyID :
            rawInheritedAndDependencyIDs.slice(numInheritedTypes)) {
@@ -3610,6 +3645,8 @@ public:
       return declOrOffset;
 
     Identifier name = MF.getIdentifier(nameID);
+    PrettySupplementalDeclNameTrace trace(name);
+
     for (TypeID dependencyID :
            rawInheritedAndDependencyIDs.slice(numInherited)) {
       auto dependency = MF.getTypeChecked(dependencyID);
@@ -3688,6 +3725,7 @@ public:
       argNames.push_back(MF.getIdentifier(argNameID));
     DeclName compoundName(ctx, baseName, argNames);
     DeclName name = argNames.empty() ? baseName : compoundName;
+    PrettySupplementalDeclNameTrace trace(name);
 
     for (TypeID dependencyID : argNameAndDependencyIDs.slice(numArgNames)) {
       auto dependency = MF.getTypeChecked(dependencyID);
@@ -3780,6 +3818,8 @@ public:
     for (auto argNameID : argNameAndDependencyIDs.slice(0, numArgNames))
       argNames.push_back(MF.getIdentifier(argNameID));
     DeclName name(ctx, DeclBaseName::createSubscript(), argNames);
+    PrettySupplementalDeclNameTrace trace(name);
+
     argNameAndDependencyIDs = argNameAndDependencyIDs.slice(numArgNames);
 
     // Exctract the accessor IDs.
@@ -4264,10 +4304,8 @@ llvm::Error DeclDeserializer::deserializeDeclAttributes() {
         serialization::decls_block::TypeEraserDeclAttrLayout::readRecord(
             scratch, isImplicit, typeEraserID);
 
-        auto typeEraser = MF.getType(typeEraserID);
         assert(!isImplicit);
-        Attr = new (ctx) TypeEraserAttr(SourceLoc(), SourceRange(),
-                                        TypeLoc::withoutLoc(typeEraser));
+        Attr = TypeEraserAttr::create(ctx, &MF, typeEraserID);
         break;
       }
 
@@ -4350,7 +4388,6 @@ llvm::Error DeclDeserializer::deserializeDeclAttributes() {
 
         DeclNameRefWithLoc origName{
             DeclNameRef(MF.getDeclBaseName(origNameId)), DeclNameLoc()};
-        auto *origDecl = cast<AbstractFunctionDecl>(MF.getDecl(origDeclId));
         auto derivativeKind =
             getActualAutoDiffDerivativeFunctionKind(rawDerivativeKind);
         if (!derivativeKind)
@@ -4363,9 +4400,33 @@ llvm::Error DeclDeserializer::deserializeDeclAttributes() {
         auto *derivativeAttr =
             DerivativeAttr::create(ctx, isImplicit, SourceLoc(), SourceRange(),
                                    /*baseType*/ nullptr, origName, indices);
-        derivativeAttr->setOriginalFunction(origDecl);
+        derivativeAttr->setOriginalFunctionResolver(&MF, origDeclId);
         derivativeAttr->setDerivativeKind(*derivativeKind);
         Attr = derivativeAttr;
+        break;
+      }
+
+      case decls_block::Transpose_DECL_ATTR: {
+        bool isImplicit;
+        uint64_t origNameId;
+        DeclID origDeclId;
+        ArrayRef<uint64_t> parameters;
+
+        serialization::decls_block::TransposeDeclAttrLayout::readRecord(
+            scratch, isImplicit, origNameId, origDeclId, parameters);
+
+        DeclNameRefWithLoc origName{
+            DeclNameRef(MF.getDeclBaseName(origNameId)), DeclNameLoc()};
+        auto *origDecl = cast<AbstractFunctionDecl>(MF.getDecl(origDeclId));
+        llvm::SmallBitVector parametersBitVector(parameters.size());
+        for (unsigned i : indices(parameters))
+          parametersBitVector[i] = parameters[i];
+        auto *indices = IndexSubset::get(ctx, parametersBitVector);
+        auto *transposeAttr =
+            TransposeAttr::create(ctx, isImplicit, SourceLoc(), SourceRange(),
+                                  /*baseTypeRepr*/ nullptr, origName, indices);
+        transposeAttr->setOriginalFunction(origDecl);
+        Attr = transposeAttr;
         break;
       }
 
@@ -5387,8 +5448,11 @@ public:
     };
 
     // Bounds check.  FIXME: overflow
-    if (2 * numParams + 2 * numResults + 2 * unsigned(hasErrorResult)
-          > variableData.size()) {
+    unsigned entriesPerParam =
+        diffKind != DifferentiabilityKind::NonDifferentiable ? 3 : 2;
+    if (entriesPerParam * numParams + 2 * numResults +
+            2 * unsigned(hasErrorResult) >
+        variableData.size()) {
       MF.fatal();
     }
 
@@ -5883,6 +5947,17 @@ ModuleFile::loadAssociatedTypeDefault(const swift::AssociatedTypeDecl *ATD,
 ValueDecl *ModuleFile::loadDynamicallyReplacedFunctionDecl(
     const DynamicReplacementAttr *DRA, uint64_t contextData) {
   return cast<ValueDecl>(getDecl(contextData));
+}
+
+AbstractFunctionDecl *
+ModuleFile::loadReferencedFunctionDecl(const DerivativeAttr *DA,
+                                       uint64_t contextData) {
+  return cast<AbstractFunctionDecl>(getDecl(contextData));
+}
+
+Type ModuleFile::loadTypeEraserType(const TypeEraserAttr *TRA,
+                                    uint64_t contextData) {
+  return getType(contextData);
 }
 
 void ModuleFile::finishNormalConformance(NormalProtocolConformance *conformance,

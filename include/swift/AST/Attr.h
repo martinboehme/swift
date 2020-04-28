@@ -1111,15 +1111,57 @@ public:
 /// The \c @_typeEraser(TypeEraserType) attribute.
 class TypeEraserAttr final : public DeclAttribute {
   TypeLoc TypeEraserLoc;
-public:
-  TypeEraserAttr(SourceLoc atLoc, SourceRange range, TypeLoc typeEraserLoc)
+  LazyMemberLoader *Resolver;
+  uint64_t ResolverContextData;
+
+  friend class ResolveTypeEraserTypeRequest;
+
+  TypeEraserAttr(SourceLoc atLoc, SourceRange range, TypeLoc typeEraserLoc,
+                 LazyMemberLoader *Resolver, uint64_t Data)
       : DeclAttribute(DAK_TypeEraser, atLoc, range, /*Implicit=*/false),
-        TypeEraserLoc(typeEraserLoc) {}
+        TypeEraserLoc(typeEraserLoc),
+        Resolver(Resolver), ResolverContextData(Data) {}
 
-  const TypeLoc &getTypeEraserLoc() const { return TypeEraserLoc; }
-  TypeLoc &getTypeEraserLoc() { return TypeEraserLoc; }
+public:
+  static TypeEraserAttr *create(ASTContext &ctx,
+                                SourceLoc atLoc, SourceRange range,
+                                TypeLoc typeEraserLoc);
 
+  static TypeEraserAttr *create(ASTContext &ctx,
+                                LazyMemberLoader *Resolver,
+                                uint64_t Data);
+
+  /// Retrieve the parsed type repr for this attribute, if it
+  /// was parsed. Else returns \c nullptr.
+  TypeRepr *getParsedTypeEraserTypeRepr() const {
+    return TypeEraserLoc.getTypeRepr();
+  }
+
+  /// Retrieve the parsed location for this attribute, if it was parsed.
+  SourceLoc getLoc() const {
+    return TypeEraserLoc.getLoc();
+  }
+
+  /// Retrieve the resolved type of this attribute if it has been resolved by a
+  /// successful call to \c getResolvedType(). Otherwise,
+  /// returns \c Type()
+  ///
+  /// This entrypoint is only suitable for syntactic clients like the
+  /// AST printer. Semantic clients should use \c getResolvedType() instead.
+  Type getTypeWithoutResolving() const {
+    return TypeEraserLoc.getType();
+  }
+
+  /// Returns \c true if the type eraser type has a valid implementation of the
+  /// erasing initializer for the given protocol.
   bool hasViableTypeEraserInit(ProtocolDecl *protocol) const;
+
+  /// Resolves the type of this attribute.
+  ///
+  /// This entrypoint is suitable for semantic clients like the
+  /// expression checker. Syntactic clients should use
+  /// \c getTypeWithoutResolving() instead.
+  Type getResolvedType(const ProtocolDecl *PD) const;
 
   static bool classof(const DeclAttribute *DA) {
     return DA->getKind() == DAK_TypeEraser;
@@ -1709,6 +1751,13 @@ class DifferentiableAttr final
   /// attribute's where clause requirements. This is set only if the attribute
   /// has a where clause.
   GenericSignature DerivativeGenericSignature;
+  /// The source location of the implicitly inherited protocol requirement
+  /// `@differentiable` attribute. Used for diagnostics, not serialized.
+  ///
+  /// This is set during conformance type-checking, only for implicit
+  /// `@differentiable` attributes created for non-public protocol witnesses of
+  /// protocol requirements with `@differentiable` attributes.
+  SourceLoc ImplicitlyInheritedDifferentiableAttrLocation;
 
   explicit DifferentiableAttr(bool implicit, SourceLoc atLoc,
                               SourceRange baseRange, bool linear,
@@ -1771,6 +1820,14 @@ public:
     DerivativeGenericSignature = derivativeGenSig;
   }
 
+  SourceLoc getImplicitlyInheritedDifferentiableAttrLocation() const {
+    return ImplicitlyInheritedDifferentiableAttrLocation;
+  }
+  void getImplicitlyInheritedDifferentiableAttrLocation(SourceLoc loc) {
+    assert(isImplicit());
+    ImplicitlyInheritedDifferentiableAttrLocation = loc;
+  }
+
   /// Get the derivative generic environment for the given `@differentiable`
   /// attribute and original function.
   GenericEnvironment *
@@ -1808,6 +1865,7 @@ class DerivativeAttr final
     : public DeclAttribute,
       private llvm::TrailingObjects<DerivativeAttr, ParsedAutoDiffParameter> {
   friend TrailingObjects;
+  friend class DerivativeAttrOriginalDeclRequest;
 
   /// The base type for the referenced original declaration. This field is
   /// non-null only for parsed attributes that reference a qualified original
@@ -1816,8 +1874,24 @@ class DerivativeAttr final
   TypeRepr *BaseTypeRepr;
   /// The original function name.
   DeclNameRefWithLoc OriginalFunctionName;
-  /// The original function declaration, resolved by the type checker.
-  AbstractFunctionDecl *OriginalFunction = nullptr;
+  /// The original function.
+  ///
+  /// The states are:
+  /// - nullptr:
+  ///   The original function is unknown. The typechecker is responsible for
+  ///   eventually resolving it.
+  /// - AbstractFunctionDecl:
+  ///   The original function is known to be this `AbstractFunctionDecl`.
+  /// - LazyMemberLoader:
+  ///   This `LazyMemberLoader` knows how to resolve the original function.
+  ///   `ResolverContextData` is an additional piece of data that the
+  ///   `LazyMemberLoader` needs.
+  // TODO(TF-1235): Making `DerivativeAttr` immutable will simplify this by
+  // removing the `AbstractFunctionDecl` state.
+  llvm::PointerUnion<AbstractFunctionDecl *, LazyMemberLoader *> OriginalFunction;
+  /// Data representing the original function declaration. See doc comment for
+  /// `OriginalFunction`.
+  uint64_t ResolverContextData = 0;
   /// The number of parsed differentiability parameters specified in 'wrt:'.
   unsigned NumParsedParameters = 0;
   /// The differentiability parameter indices, resolved by the type checker.
@@ -1850,12 +1924,10 @@ public:
   DeclNameRefWithLoc getOriginalFunctionName() const {
     return OriginalFunctionName;
   }
-  AbstractFunctionDecl *getOriginalFunction() const {
-    return OriginalFunction;
-  }
-  void setOriginalFunction(AbstractFunctionDecl *decl) {
-    OriginalFunction = decl;
-  }
+  AbstractFunctionDecl *getOriginalFunction(ASTContext &context) const;
+  void setOriginalFunction(AbstractFunctionDecl *decl);
+  void setOriginalFunctionResolver(LazyMemberLoader *resolver,
+                                   uint64_t resolverContextData);
 
   AutoDiffDerivativeFunctionKind getDerivativeKind() const {
     assert(Kind && "Derivative function kind has not yet been resolved");

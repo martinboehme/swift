@@ -92,6 +92,11 @@ static void addMandatoryOptPipeline(SILPassPipelinePlan &P) {
   P.addAllocBoxToStack();
   P.addNoReturnFolding();
   addDefiniteInitialization(P);
+
+  // Automatic differentiation: canonicalize all differentiability witnesses
+  // and `differentiable_function` instructions.
+  P.addDifferentiation();
+
   // Only run semantic arc opts if we are optimizing and if mandatory semantic
   // arc opts is explicitly enabled.
   //
@@ -356,6 +361,9 @@ void addSSAPasses(SILPassPipelinePlan &P, OptimizationLevelKind OpLevel) {
   }
 
   P.addPerformanceConstantPropagation();
+  // Remove redundant arguments right before CSE and DCE, so that CSE and DCE
+  // can cleanup redundant and dead instructions.
+  P.addRedundantPhiElimination();
   P.addCSE();
   P.addDCE();
 

@@ -1031,9 +1031,9 @@ public:
   createUncheckedRefCastAddr(SILLocation Loc,
                              SILValue src, CanType sourceFormalType,
                              SILValue dest, CanType targetFormalType) {
-    return insert(new (getModule()) UncheckedRefCastAddrInst(
+    return insert(UncheckedRefCastAddrInst::create(
         getSILDebugLocation(Loc), src, sourceFormalType,
-        dest, targetFormalType));
+        dest, targetFormalType, getFunction(), C.OpenedArchetypes));
   }
 
   UncheckedAddrCastInst *createUncheckedAddrCast(SILLocation Loc, SILValue Op,
@@ -1152,9 +1152,9 @@ public:
   createUnconditionalCheckedCastAddr(SILLocation Loc,
                                      SILValue src, CanType sourceFormalType,
                                      SILValue dest, CanType targetFormalType) {
-    return insert(new (getModule()) UnconditionalCheckedCastAddrInst(
+    return insert(UnconditionalCheckedCastAddrInst::create(
         getSILDebugLocation(Loc), src, sourceFormalType,
-        dest, targetFormalType));
+        dest, targetFormalType, getFunction(), C.OpenedArchetypes));
   }
 
   UnconditionalCheckedCastValueInst *
@@ -1989,9 +1989,10 @@ public:
                               SILBasicBlock *failureBB,
                               ProfileCounter Target1Count = ProfileCounter(),
                               ProfileCounter Target2Count = ProfileCounter()) {
-    return insertTerminator(new (getModule()) CheckedCastAddrBranchInst(
+    return insertTerminator(CheckedCastAddrBranchInst::create(
         getSILDebugLocation(Loc), consumption, src, sourceFormalType, dest,
-        targetFormalType, successBB, failureBB, Target1Count, Target2Count));
+        targetFormalType, successBB, failureBB, Target1Count, Target2Count,
+        getFunction(), C.OpenedArchetypes));
   }
 
   //===--------------------------------------------------------------------===//
@@ -2172,6 +2173,14 @@ public:
         OriginalFunction, JVPAndVJPFunctions, hasOwnership()));
   }
 
+  LinearFunctionInst *createLinearFunction(
+      SILLocation Loc, IndexSubset *ParameterIndices, SILValue OriginalFunction,
+      Optional<SILValue> TransposeFunction = None) {
+    return insert(LinearFunctionInst::create(
+        getModule(), getSILDebugLocation(Loc), ParameterIndices,
+        OriginalFunction, TransposeFunction, hasOwnership()));
+  }
+
   /// Note: explicit extractee type may be specified only in lowered SIL.
   DifferentiableFunctionExtractInst *createDifferentiableFunctionExtract(
       SILLocation Loc, NormalDifferentiableFunctionTypeComponent Extractee,
@@ -2179,6 +2188,21 @@ public:
     return insert(new (getModule()) DifferentiableFunctionExtractInst(
         getModule(), getSILDebugLocation(Loc), Extractee, Function,
         ExtracteeType));
+  }
+
+  DifferentiableFunctionExtractInst *
+  createDifferentiableFunctionExtractOriginal(SILLocation Loc,
+                                              SILValue TheFunction) {
+    return insert(new (getModule()) DifferentiableFunctionExtractInst(
+        getModule(), getSILDebugLocation(Loc),
+        NormalDifferentiableFunctionTypeComponent::Original, TheFunction));
+  }
+
+  LinearFunctionExtractInst *createLinearFunctionExtract(
+      SILLocation Loc, LinearDifferentiableFunctionTypeComponent Extractee,
+      SILValue TheFunction) {
+    return insert(new (getModule()) LinearFunctionExtractInst(
+        getModule(), getSILDebugLocation(Loc), Extractee, TheFunction));
   }
 
   /// Note: explicit function type may be specified only in lowered SIL.
