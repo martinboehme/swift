@@ -2698,7 +2698,8 @@ llvm::Function *IRGenModule::getAddrOfSILFunction(
     IRGen.addLazyFunction(f);
   }
 
-  Signature signature = getSignature(f->getLoweredFunctionType());
+  Signature signature = getSignature(f->getLoweredFunctionType(),
+                                     dyn_cast_or_null<clang::FunctionDecl>(f->getClangDecl()));
   addLLVMFunctionAttributes(f, signature);
 
   LinkInfo link = LinkInfo::get(*this, entity, forDefinition);

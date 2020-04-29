@@ -20,6 +20,7 @@
 
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/CallingConv.h"
+#include "IRGenModule.h"
 #include "swift/AST/Types.h"
 #include "swift/Basic/ExternalUnion.h"
 
@@ -120,7 +121,8 @@ public:
   /// IRGenModule::getSignature(CanSILFunctionType), which is what
   /// clients should generally be using.
   static Signature getUncached(IRGenModule &IGM,
-                               CanSILFunctionType formalType);
+                               CanSILFunctionType formalType,
+                               const clang::FunctionDecl *clangFunc = nullptr);
 
   /// Compute the signature of a coroutine's continuation function.
   static Signature forCoroutineContinuation(IRGenModule &IGM,

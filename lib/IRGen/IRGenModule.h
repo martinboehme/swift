@@ -72,6 +72,7 @@ namespace clang {
   template <class> class CanQual;
   class CodeGenerator;
   class Decl;
+  class FunctionDecl;
   class GlobalDecl;
   class Type;
   class PointerAuthSchema;
@@ -1329,11 +1330,13 @@ public:
   void finalizeClangCodeGen();
   void finishEmitAfterTopLevel();
 
-  Signature getSignature(CanSILFunctionType fnType);
+  Signature getSignature(CanSILFunctionType fnType,
+                         const clang::FunctionDecl *clangFunc = nullptr);
   llvm::FunctionType *getFunctionType(CanSILFunctionType type,
                                       llvm::AttributeList &attrs,
                                       ForeignFunctionInfo *foreignInfo=nullptr);
-  ForeignFunctionInfo getForeignFunctionInfo(CanSILFunctionType type);
+  ForeignFunctionInfo getForeignFunctionInfo(CanSILFunctionType type,
+                                             const clang::FunctionDecl *clangFunc);
 
   llvm::ConstantInt *getInt32(uint32_t value);
   llvm::ConstantInt *getSize(Size size);

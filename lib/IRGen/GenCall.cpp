@@ -231,6 +231,7 @@ namespace {
   class SignatureExpansion {
     IRGenModule &IGM;
     CanSILFunctionType FnType;
+    const clang::FunctionDecl *ClangFunc;
   public:
     SmallVector<llvm::Type*, 8> ParamIRTypes;
     llvm::Type *ResultIRType = nullptr;
@@ -241,8 +242,9 @@ namespace {
     bool CanUseError = true;
     bool CanUseSelf = true;
 
-    SignatureExpansion(IRGenModule &IGM, CanSILFunctionType fnType)
-      : IGM(IGM), FnType(fnType) {}
+    SignatureExpansion(IRGenModule &IGM, CanSILFunctionType fnType,
+                       const clang::FunctionDecl *clangFunc = nullptr)
+        : IGM(IGM), FnType(fnType), ClangFunc(clangFunc) {}
 
     /// Expand the components of the primary entrypoint of the function type.
     void expandFunctionType();
@@ -1125,10 +1127,18 @@ void SignatureExpansion::expandExternalSignatureTypes() {
 
   // Generate function info for this signature.
   auto extInfo = clang::FunctionType::ExtInfo();
-  auto &FI = clang::CodeGen::arrangeFreeFunctionCall(IGM.ClangCodeGen->CGM(),
-                                             clangResultTy, paramTys, extInfo,
-                                             clang::CodeGen::RequiredArgs::All);
-  ForeignInfo.ClangInfo = &FI;
+  auto *cxxConstructorDecl = dyn_cast_or_null<clang::CXXConstructorDecl>(ClangFunc);
+  if (cxxConstructorDecl) {
+    ForeignInfo.ClangInfo = &clang::CodeGen::arrangeCXXConstructorCall(
+        IGM.ClangCodeGen->CGM(),
+        const_cast<clang::CXXConstructorDecl *>(cxxConstructorDecl), paramTys,
+        extInfo);
+  } else {
+    ForeignInfo.ClangInfo = &clang::CodeGen::arrangeFreeFunctionCall(IGM.ClangCodeGen->CGM(),
+                                               clangResultTy, paramTys, extInfo,
+                                               clang::CodeGen::RequiredArgs::All);
+  }
+  auto &FI = *ForeignInfo.ClangInfo;
 
   assert(FI.arg_size() == paramTys.size() &&
          "Expected one ArgInfo for each parameter type!");
@@ -1488,9 +1498,10 @@ Signature SignatureExpansion::getSignature() {
 }
 
 Signature Signature::getUncached(IRGenModule &IGM,
-                                 CanSILFunctionType formalType) {
+                                 CanSILFunctionType formalType,
+                                 const clang::FunctionDecl *clangFunc) {
   GenericContextScope scope(IGM, formalType->getInvocationGenericSignature());
-  SignatureExpansion expansion(IGM, formalType);
+  SignatureExpansion expansion(IGM, formalType, clangFunc);
   expansion.expandFunctionType();
   return expansion.getSignature();
 }

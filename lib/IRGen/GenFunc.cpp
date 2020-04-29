@@ -129,7 +129,8 @@ namespace {
     FuncSignatureInfo(CanSILFunctionType formalType)
       : FormalType(formalType) {}
     
-    Signature getSignature(IRGenModule &IGM) const;
+    Signature getSignature(IRGenModule &IGM,
+                           const clang::FunctionDecl *clangFunc = nullptr) const;
   };
 
   /// The @thin function type-info class.
@@ -552,13 +553,14 @@ const TypeInfo *TypeConverter::convertFunctionType(SILFunctionType *T) {
   llvm_unreachable("bad function type representation");
 }
 
-Signature FuncSignatureInfo::getSignature(IRGenModule &IGM) const {
+Signature FuncSignatureInfo::getSignature(IRGenModule &IGM,
+    const clang::FunctionDecl *clangFunc) const {
   // If it's already been filled in, we're done.
   if (TheSignature.isValid())
     return TheSignature;
 
   // Update the cache and return.
-  TheSignature = Signature::getUncached(IGM, FormalType);
+  TheSignature = Signature::getUncached(IGM, FormalType, clangFunc);
   assert(TheSignature.isValid());
   return TheSignature;
 }
@@ -583,9 +585,10 @@ getFuncSignatureInfoForLowered(IRGenModule &IGM, CanSILFunctionType type) {
 }
 
 Signature
-IRGenModule::getSignature(CanSILFunctionType type) {
+IRGenModule::getSignature(CanSILFunctionType type,
+                          const clang::FunctionDecl *clangFunc) {
   auto &sigInfo = getFuncSignatureInfoForLowered(*this, type);
-  return sigInfo.getSignature(*this);
+  return sigInfo.getSignature(*this, clangFunc);
 }
 
 llvm::FunctionType *
@@ -600,12 +603,13 @@ IRGenModule::getFunctionType(CanSILFunctionType type,
 }
 
 ForeignFunctionInfo
-IRGenModule::getForeignFunctionInfo(CanSILFunctionType type) {
+IRGenModule::getForeignFunctionInfo(CanSILFunctionType type,
+                                    const clang::FunctionDecl *clangFunc) {
   if (type->getLanguage() == SILFunctionLanguage::Swift)
     return ForeignFunctionInfo();
 
   auto &sigInfo = getFuncSignatureInfoForLowered(*this, type);
-  return sigInfo.getSignature(*this).getForeignInfo();
+  return sigInfo.getSignature(*this, clangFunc).getForeignInfo();
 }
 
 static void emitApplyArgument(IRGenFunction &IGF,

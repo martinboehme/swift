@@ -1458,7 +1458,10 @@ static void emitEntryPointArgumentsCOrObjC(IRGenSILFunction &IGF,
                                            Explosion &params,
                                            CanSILFunctionType funcTy) {
   // First, lower the method type.
-  ForeignFunctionInfo foreignInfo = IGF.IGM.getForeignFunctionInfo(funcTy);
+  const clang::FunctionDecl *clangFunc =
+      dyn_cast_or_null<clang::FunctionDecl>(IGF.CurSILFn->getClangDecl());
+  ForeignFunctionInfo foreignInfo =
+      IGF.IGM.getForeignFunctionInfo(funcTy, clangFunc);
   assert(foreignInfo.ClangInfo);
   auto &FI = *foreignInfo.ClangInfo;
 
@@ -1936,7 +1939,8 @@ void IRGenSILFunction::visitFunctionRefBaseInst(FunctionRefBaseInst *i) {
       fn, NotForDefinition, false /*isDynamicallyReplaceableImplementation*/,
       isa<PreviousDynamicFunctionRefInst>(i));
 
-  auto sig = IGM.getSignature(fn->getLoweredFunctionType());
+  auto sig = IGM.getSignature(fn->getLoweredFunctionType(),
+                              dyn_cast_or_null<clang::FunctionDecl>(fn->getClangDecl()));
 
   // Note that the pointer value returned by getAddrOfSILFunction doesn't
   // necessarily have element type sig.getType(), e.g. if it's imported.
