@@ -13,6 +13,7 @@
 #ifndef SWIFT_AST_CLANG_MODULE_LOADER_H
 #define SWIFT_AST_CLANG_MODULE_LOADER_H
 
+#include "clang/Basic/SourceLocation.h"
 #include "swift/AST/ModuleLoader.h"
 #include "swift/Basic/TaggedUnion.h"
 
@@ -184,6 +185,10 @@ public:
   /// Print the Clang type.
   virtual void printClangType(const clang::Type *type,
                               llvm::raw_ostream &os) const = 0;
+
+  /// TODO: Comment
+  virtual SourceLoc
+  resolveSourceLocation(clang::SourceLocation clangLoc) const = 0;
 
   /// Try to find a stable serialization path for the given declaration,
   /// if there is one.

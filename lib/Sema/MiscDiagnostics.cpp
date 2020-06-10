@@ -17,7 +17,12 @@
 #include "MiscDiagnostics.h"
 #include "TypeChecker.h"
 #include "TypeCheckAvailability.h"
+#include "clang/AST/ASTContext.h"
+#include "clang/AST/Decl.h"
+#include "clang/AST/DeclBase.h"
+#include "clang/Basic/SourceManager.h"
 #include "swift/AST/ASTWalker.h"
+#include "swift/AST/ClangModuleLoader.h"
 #include "swift/AST/NameLookup.h"
 #include "swift/AST/NameLookupRequests.h"
 #include "swift/AST/Pattern.h"
@@ -2616,6 +2621,103 @@ public:
   }
 };
 
+class RejectTextualIncludesChecker : public ASTWalker {
+  DiagnosticEngine &Diags;
+public:
+  RejectTextualIncludesChecker(DiagnosticEngine &Diags) : Diags(Diags) {}
+
+  bool isImplicitTextualInclude(const clang::Decl *clangDecl) {
+    const clang::Module *module = clangDecl->getOwningModule();
+
+    if (!module)
+      return true;
+
+    return isImplicitTextualInclude(clangDecl, module);
+  }
+
+  bool isImplicitTextualInclude(const clang::Decl *clangDecl,
+                 const clang::Module *module) {
+    for (const auto &exp : module->Exports) {
+      if (exp.getPointer() == nullptr && exp.getInt() == 1)
+        return false;
+    }
+
+    clang::SourceManager &sourceManager = clangDecl->getASTContext().getSourceManager();
+    const clang::FileEntry *fileEntry = sourceManager.getFileEntryForID(sourceManager.getFileID(clangDecl->getLocation()));
+
+    llvm::errs() << "fileEntry is " << fileEntry->getName() << "\n";
+    for (int kind :
+         {clang::Module::HK_Normal, clang::Module::HK_Textual,
+          clang::Module::HK_Private, clang::Module::HK_PrivateTextual}) {
+      for (const auto &header : module->Headers[kind]) {
+        llvm::errs() << "Header " << header.Entry->getName() << "\n";
+        if (header.Entry->getUID() == fileEntry->getUID()) {
+          return false;
+        }
+      }
+    }
+
+    return true;
+  }
+
+  const ModuleDecl *getQualifyingModule() {
+    auto *DotSyntax =
+        dyn_cast_or_null<DotSyntaxBaseIgnoredExpr>(Parent.getAsExpr());
+    if (!DotSyntax)
+      return nullptr;
+
+    auto *LHS_DRE = dyn_cast<DeclRefExpr>(DotSyntax->getLHS());
+    if (!LHS_DRE) return nullptr;
+
+    return dyn_cast<ModuleDecl>(LHS_DRE->getDecl());
+  }
+
+  void checkTextualInclude(const DeclRefExpr *DRE) {
+    const ValueDecl *decl = DRE->getDecl();
+
+    const clang::Decl *clangDecl = decl->getClangDecl();
+    if (!clangDecl) return;
+
+    const clang::Module *module = clangDecl->getOwningModule();
+
+    if (!module) return;
+
+    if (const ModuleDecl *QualifyingModule = getQualifyingModule()) {
+        module = QualifyingModule->findUnderlyingClangModule();
+        // TODO: Explain
+        if (!module) return;
+
+        if (!isImplicitTextualInclude(clangDecl, module)) return;
+    } else {
+      for (auto redecl : clangDecl->redecls()) {
+        if (!isImplicitTextualInclude(redecl)) return;
+      }
+    }
+
+    StringRef moduleName = module->Name;
+
+    Diags.diagnose(DRE->getLoc(), diag::decl_from_textual_header,
+                   moduleName, decl->getDescriptiveKind(), decl->getName());
+    ClangModuleLoader *clangLoader =
+        decl->getASTContext().getClangModuleLoader();
+    Diags.diagnose(clangLoader->resolveSourceLocation(clangDecl->getLocation()), diag::decl_from_textual_header_note_header,
+                   decl->getName());
+    if (module) {
+      Diags.diagnose(
+          clangLoader->resolveSourceLocation(module->DefinitionLoc),
+          diag::decl_from_textual_header_note_module, moduleName);
+    }
+  }
+
+  std::pair<bool, Expr *> walkToExprPre(Expr *E) override {
+    if (auto *DRE = dyn_cast<DeclRefExpr>(E)) {
+      checkTextualInclude(DRE);
+    }
+
+    return { true, E };
+  }
+};
+
 } // end anonymous namespace
 
 // After we have scanned the entire region, diagnose variables that could be
@@ -3097,6 +3199,8 @@ performTopLevelDeclDiagnostics(TopLevelCodeDecl *TLCD) {
   auto &ctx = TLCD->getDeclContext()->getASTContext();
   VarDeclUsageChecker checker(ctx.Diags);
   TLCD->walk(checker);
+  RejectTextualIncludesChecker textualChecker(ctx.Diags);
+  TLCD->walk(textualChecker);
 }
 
 /// Perform diagnostics for func/init/deinit declarations.
